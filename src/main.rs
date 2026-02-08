@@ -20,15 +20,16 @@ async fn main() -> Result<()> {
 
     // 2. Load and process PDF
     println!("📖 Reading {}...", PDF_PATH);
-    let content = load_pdf_content(PDF_PATH)?;
+    let content: String = load_pdf_content(PDF_PATH)?;
 
     // 3. Create embeddings and vector store
     println!("🔨 Creating embeddings...");
-    let embedding_model = create_embedding_model(&client);
-    let vector_store = build_vector_store(content, &embedding_model).await?;
+    let embedding_model: EmbeddingModel = create_embedding_model(&client);
+    let vector_store: InMemoryVectorStore<String> =
+        build_vector_store(content, &embedding_model).await?;
 
     // 4. Create RAG agent
-    let agent = client
+    let agent: rig::agent::Agent<ollama::CompletionModel> = client
         .agent(LLM_MODEL)
         .preamble(
             "You are 'Perso', a knowledgeable personal assistant. \
@@ -52,7 +53,7 @@ fn create_ollama_client() -> Result<ollama::Client> {
 }
 
 fn load_pdf_content(path: &str) -> Result<String> {
-    let pdf_path = Path::new(path);
+    let pdf_path: &Path = Path::new(path);
 
     if !pdf_path.exists() {
         anyhow::bail!(
@@ -72,12 +73,13 @@ async fn build_vector_store(
     content: String,
     embedding_model: &EmbeddingModel,
 ) -> Result<InMemoryVectorStore<String>> {
-    let embeddings = EmbeddingsBuilder::new(embedding_model.clone())
-        .document(content)
-        .context("Failed to create document embedding")?
-        .build()
-        .await
-        .context("Failed to build embeddings")?;
+    let embeddings: Vec<(String, rig::OneOrMany<rig::embeddings::Embedding>)> =
+        EmbeddingsBuilder::new(embedding_model.clone())
+            .document(content)
+            .context("Failed to create document embedding")?
+            .build()
+            .await
+            .context("Failed to build embeddings")?;
 
     Ok(InMemoryVectorStore::from_documents(embeddings))
 }
@@ -85,19 +87,19 @@ async fn build_vector_store(
 async fn run_chat_loop(agent: impl Prompt) -> Result<()> {
     println!("✨ Perso is ready! (Type 'exit' or 'quit' to end)\n");
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let stdin: io::Stdin = io::stdin();
+    let mut stdout: io::Stdout = io::stdout();
 
     loop {
         print!("👤 You: ");
         stdout.flush()?;
 
-        let mut input = String::new();
+        let mut input: String = String::new();
         stdin
             .read_line(&mut input)
             .context("Failed to read user input")?;
 
-        let query = input.trim();
+        let query: &str = input.trim();
 
         match query {
             "exit" | "quit" => {

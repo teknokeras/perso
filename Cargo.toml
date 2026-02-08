@@ -1,0 +1,12 @@
+[package]
+name = "perso"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.101"
+futures-util = "0.3.31"
+lancedb = "0.26.1"
+pdf-extract = "0.10.0"
+rig-core = "0.30.0"
+tokio = "1.49.0"

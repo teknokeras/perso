@@ -1,76 +1,118 @@
+use anyhow::{Context, Result};
 use rig::client::{CompletionClient, Nothing};
-use rig::providers::ollama::{self, EmbeddingModel};
-use rig::embeddings::EmbeddingsBuilder;
-use rig::vector_store::in_memory_store::InMemoryVectorStore;
 use rig::completion::Prompt;
+use rig::embeddings::EmbeddingsBuilder;
+use rig::providers::ollama::{self, EmbeddingModel};
+use rig::vector_store::in_memory_store::InMemoryVectorStore;
+use std::io::{self, Write};
 use std::path::Path;
 
+const PDF_PATH: &str = "knowledge.pdf";
+const EMBEDDING_MODEL: &str = ollama::NOMIC_EMBED_TEXT;
+const EMBEDDING_DIMS: usize = 768;
+const LLM_MODEL: &str = "llama3:latest";
+const TOP_K_RESULTS: usize = 3; // Increased from 2 for better context
+
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
+async fn main() -> Result<()> {
     // 1. Initialize Ollama Client
-    // In 0.3.0, if you use the default local address, you can just use default()
-    // let client = ollama::Client::from("http://localhost:11434");
-    let client: ollama::Client = ollama::Client::builder()
-        .api_key(Nothing)
-        .build()
-        .unwrap();
+    let client: rig::client::Client<ollama::OllamaExt> = create_ollama_client()?;
 
-    // 2. Load PDF and Extract Text
-    println!("📖 Reading knowledge.pdf...");
-    let pdf_path: &Path = Path::new("knowledge.pdf");
-    
-    // Ensure the file exists before trying to read it
-    if !pdf_path.exists() {
-        anyhow::bail!("File 'knowledge.pdf' not found! Please place it in the project folder.");
-    }
-    
-    let content: String = pdf_extract::extract_text(&pdf_path)?;
+    // 2. Load and process PDF
+    println!("📖 Reading {}...", PDF_PATH);
+    let content = load_pdf_content(PDF_PATH)?;
 
-    // 3. Create Embeddings Model
-    // let embedding_model = client.embedding_model(ollama::NOMIC_EMBED_TEXT);
-    println!("📖 create embedding model");
-    // let embedding_model: ollama::EmbeddingModel = client.embedding_model(ollama::NOMIC_EMBED_TEXT, 768);
-    let embedding_model: EmbeddingModel = ollama::EmbeddingModel::new(
-        client.clone(),
-    ollama::NOMIC_EMBED_TEXT,
-        768  // dimensions for nomic-embed-text
-    );
-    
-    println!("📖 created embedding model");
+    // 3. Create embeddings and vector store
+    println!("🔨 Creating embeddings...");
+    let embedding_model = create_embedding_model(&client);
+    let vector_store = build_vector_store(content, &embedding_model).await?;
 
-    // 4. Build the Vector Store
-    println!("🔨 Indexing document (M2 Pro Power)...");
-    let embeddings: Vec<(String, rig::OneOrMany<rig::embeddings::Embedding>)> = EmbeddingsBuilder::new(embedding_model.clone())
-        .document(content.clone())? // Note the '?' for error handling in 0.3.0
-        .build()
-        .await?;
-
-    let vector_store: InMemoryVectorStore<String>    = InMemoryVectorStore::from_documents(embeddings);
-
-    // 5. Create the RAG Agent
-    // We use the vector store as a 'dynamic context'
-    let perso_agent = client.agent("llama3:latest")
-        .preamble("You are 'Perso', a personal assistant. Use the provided context to answer questions accurately.")
-        .dynamic_context(2, vector_store.index(embedding_model)) 
+    // 4. Create RAG agent
+    let agent = client
+        .agent(LLM_MODEL)
+        .preamble(
+            "You are 'Perso', a knowledgeable personal assistant. \
+             Answer questions accurately based on the provided context. \
+             If the context doesn't contain relevant information, say so honestly.",
+        )
+        .dynamic_context(TOP_K_RESULTS, vector_store.index(embedding_model))
         .build();
 
-    // 6. Interactive Chat Loop
-    println!("✨ Perso is ready! (Type 'exit' to quit)");
-    
+    // 5. Interactive chat loop
+    run_chat_loop(agent).await?;
+
+    Ok(())
+}
+
+fn create_ollama_client() -> Result<ollama::Client> {
+    ollama::Client::builder()
+        .api_key(Nothing)
+        .build()
+        .context("Failed to create Ollama client")
+}
+
+fn load_pdf_content(path: &str) -> Result<String> {
+    let pdf_path = Path::new(path);
+
+    if !pdf_path.exists() {
+        anyhow::bail!(
+            "File '{}' not found! Please place it in the project folder.",
+            path
+        );
+    }
+
+    pdf_extract::extract_text(pdf_path).context("Failed to extract text from PDF")
+}
+
+fn create_embedding_model(client: &ollama::Client) -> EmbeddingModel {
+    EmbeddingModel::new(client.clone(), EMBEDDING_MODEL, EMBEDDING_DIMS)
+}
+
+async fn build_vector_store(
+    content: String,
+    embedding_model: &EmbeddingModel,
+) -> Result<InMemoryVectorStore<String>> {
+    let embeddings = EmbeddingsBuilder::new(embedding_model.clone())
+        .document(content)
+        .context("Failed to create document embedding")?
+        .build()
+        .await
+        .context("Failed to build embeddings")?;
+
+    Ok(InMemoryVectorStore::from_documents(embeddings))
+}
+
+async fn run_chat_loop(agent: impl Prompt) -> Result<()> {
+    println!("✨ Perso is ready! (Type 'exit' or 'quit' to end)\n");
+
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
     loop {
-        let mut input: String = String::new();
-        print!("\n👤 You: ");
-        use std::io::Write; // Explicitly bring trait into scope
-        std::io::stdout().flush()?;
-        std::io::stdin().read_line(&mut input)?;
+        print!("👤 You: ");
+        stdout.flush()?;
 
-        let trim_input = input.trim();
-        if trim_input == "exit" || trim_input == "quit" { break; }
-        if trim_input.is_empty() { continue; }
+        let mut input = String::new();
+        stdin
+            .read_line(&mut input)
+            .context("Failed to read user input")?;
 
-        println!("🤖 Perso thinking...");
-        let response = perso_agent.prompt(trim_input).await?;
-        println!("🤖 Perso: {}", response);
+        let query = input.trim();
+
+        match query {
+            "exit" | "quit" => {
+                println!("👋 Goodbye!");
+                break;
+            }
+            "" => continue,
+            _ => {
+                println!("🤖 Perso thinking...");
+                match agent.prompt(query).await {
+                    Ok(response) => println!("🤖 Perso: {}\n", response),
+                    Err(e) => eprintln!("❌ Error: {}\n", e),
+                }
+            }
+        }
     }
 
     Ok(())

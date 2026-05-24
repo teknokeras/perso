@@ -1,0 +1,40 @@
+# Rust build output
+/target/
+
+# Per-crate build artifacts (in case of nested builds)
+**/target/
+
+# Compiled WASM artifacts
+/dist/
+*.wasm
+
+# Cargo lock is committed for binaries, but ignored for libraries.
+# perso is a workspace with both — keep the lock file.
+# Cargo.lock  ← intentionally not ignored
+
+# IDE and editor files
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files (may contain secrets or local paths)
+.env
+.env.*
+
+# Benchmark output
+/criterion/
+
+# Code coverage
+/lcov.info
+/coverage/
+tarpaulin-report.html
+
+# Local test WASM paths (set via PERSO_WASM env var, not committed)
+dist/

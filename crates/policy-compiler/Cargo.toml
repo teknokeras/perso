@@ -1,0 +1,15 @@
+[package]
+name = "policy-compiler"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "policy-compiler"
+path = "src/main.rs"
+
+[dependencies]
+policy-core    = { path = "../policy-core" }
+policy-runtime = { path = "../policy-runtime" }
+serde_json     = { workspace = true }
+clap           = { workspace = true }
+anyhow         = { workspace = true }

@@ -1,0 +1,69 @@
+{
+  "version": "perso-1.0.0",
+  "default_action": "Deny",
+  "tools": [
+    "read_file", "write_file", "edit_file", "dangerous_delete",
+    "refund_user", "upload_file", "read_restricted", "sensitive_tool",
+    "edit_document", "guarded_tool", "open_tool",
+    "glob_tool_alpha", "glob_tool_beta"
+  ],
+  "rules": [
+    { "tool_name": "read_file", "roles": ["viewer"], "condition": null },
+    { "tool_name": "write_file", "roles": ["supervisor"], "condition": null },
+    { "tool_name": "dangerous_delete", "roles": ["admin"], "condition": null },
+    {
+      "tool_name": "refund_user",
+      "roles": ["supervisor"],
+      "condition": {
+        "NumericCheck": { "source": "Arguments", "field": "amount", "op": "Lte", "value": 500.0 }
+      }
+    },
+    {
+      "tool_name": "read_restricted",
+      "roles": ["viewer"],
+      "condition": {
+        "StringCheck": {
+          "source": "Arguments", "field": "path", "op": "NotIn",
+          "value": ["/etc/passwd", "/etc/shadow", "/etc/sudoers"]
+        }
+      }
+    },
+    {
+      "tool_name": "sensitive_tool",
+      "roles": ["supervisor"],
+      "condition": {
+        "FieldPresent": { "source": "AgentAttributes", "field": "session_token" }
+      }
+    },
+    {
+      "tool_name": "edit_document",
+      "roles": ["admin"],
+      "condition": {
+        "Any": [
+          { "FieldEquals": { "source_a": "AgentAttributes", "field_a": "user_id", "source_b": "ResourceAttributes", "field_b": "owner_id" } },
+          { "StringCheck": { "source": "AgentAttributes", "field": "role", "op": "In", "value": ["admin"] } }
+        ]
+      }
+    },
+    {
+      "tool_name": "guarded_tool",
+      "roles": ["supervisor"],
+      "condition": {
+        "All": [
+          { "StringCheck": { "source": "AgentAttributes", "field": "env", "op": "In", "value": ["production"] } },
+          { "FieldPresent": { "source": "AgentAttributes", "field": "mfa_verified" } }
+        ]
+      }
+    },
+    {
+      "tool_name": "open_tool",
+      "roles": ["viewer", "supervisor", "admin"],
+      "condition": {
+        "Not": {
+          "StringCheck": { "source": "AgentAttributes", "field": "role", "op": "In", "value": ["blocked_role"] }
+        }
+      }
+    },
+    { "tool_name": "glob_tool_*", "roles": ["admin"], "condition": null }
+  ]
+}

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/policy-core",
+    "crates/policy-compiler",
+    "crates/policy-runtime",
+    "crates/policy-test",
+]
+
+# ─── Workspace-level dependency table ────────────────────────────────────────
+# All crates inherit from here; individual Cargo.tomls use
+#   some-dep = { workspace = true }
+[workspace.dependencies]
+serde       = { version = "=1.0.197", features = ["derive"] }
+serde_json  = "=1.0.113"
+anyhow      = "=1.0.79"
+clap        = { version = "=4.4.18", features = ["derive"] }
+# wasmtime added back in Phase 6 with toolchain upgrade
+
+# ─── Pinned transitive deps required for wasmtime 14 on Rust 1.75 ─────────────
+wasmtime  = { version = "=14.0.4", default-features = false, features = ["cranelift"] }
+indexmap  = "=2.2.6"
+uuid      = "=1.6.1"

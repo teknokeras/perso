@@ -1,0 +1,13 @@
+[package]
+name = "policy-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+policy-core    = { path = "../policy-core" }
+policy-runtime = { path = "../policy-runtime" }
+serde_json     = { workspace = true }
+anyhow         = { workspace = true }
+wasmtime       = { workspace = true }
+indexmap       = { workspace = true }
+uuid           = { workspace = true }

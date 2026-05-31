@@ -46,11 +46,12 @@ The LLM returns a tool call intent. The backend intercepts it, builds a context 
 perso/
 ├── Cargo.toml                  # workspace root — all shared deps declared here
 ├── policies/
-│   └── example.json            # ready-to-use example policy
+│   ├── example.json            # ready-to-use example policy
+│   └── policy.schema.json      # JSON Schema for policy validation
 └── crates/
     ├── policy-core/            # shared types, serde AST, parse_policy()
     ├── policy-runtime/         # glob expander, condition evaluator, WASM exports
-    ├── policy-compiler/        # CLI: validate and build commands
+    ├── policy-compiler/        # CLI: validate, build, and validate-and-build commands
     └── policy-test/            # integration test suite
 ```
 
@@ -62,7 +63,7 @@ perso/
 
 The shared data model. Every other crate depends on it. Contains:
 
-- `Policy` — the top-level document (version, default_action, tools, rules)
+- `Policy` — the top-level document (version, default_action, tools, roles, rules)
 - `Rule` — a single access rule: tool name (or glob), roles, optional condition
 - `Condition` — a recursive enum: `All`, `Any`, `Not`, `NumericCheck`, `StringCheck`, `FieldPresent`, `FieldEquals`
 - `Source` — where a condition reads its data from: `Arguments`, `AgentAttributes`, or `ResourceAttributes`
@@ -95,11 +96,13 @@ Policy state is held in a `OnceLock<Mutex<PolicyState>>`. Calling `init` again r
 
 ### policy-compiler
 
-A CLI with two subcommands.
+A CLI with three subcommands.
 
-**`validate`** — parses the policy JSON, expands all globs, and reports warnings and errors without producing any output file. Useful in CI.
+**`validate`** — runs the JSON Schema check followed by semantic validation (parse, glob-expand, cross-reference tools and roles). Reports all warnings and errors without producing any output file. Useful in CI.
 
-**`build`** — validates the policy, then invokes `cargo build --release --target wasm32-unknown-unknown -p policy-runtime`, and copies the resulting `.wasm` to the path you specify.
+**`build`** — compiles the policy-runtime engine to WASM without requiring a policy file. Invokes `cargo build --release --target wasm32-unknown-unknown -p policy-runtime` and copies the resulting `.wasm` to the path you specify. The policy JSON is **not** embedded in the binary — it is loaded separately at runtime via `init()`.
+
+**`validate-and-build`** — runs `validate` first and only proceeds to `build` if the policy is valid. The recommended command for most workflows: catches policy errors before spending time on a cargo build.
 
 ### policy-test
 
@@ -118,6 +121,7 @@ The integration test suite, split into two layers:
   "version": "perso-1.0.0",
   "default_action": "Deny",
   "tools": ["read_file", "write_file", "glob_tool_alpha", "glob_tool_beta"],
+  "roles": ["viewer", "supervisor", "admin"],
   "rules": [
     { "tool_name": "read_file", "roles": ["viewer"], "condition": null },
     { "tool_name": "glob_tool_*", "roles": ["admin"], "condition": null }
@@ -130,6 +134,7 @@ The integration test suite, split into two layers:
 | `version` | yes | Schema version string, e.g. `"perso-1.0.0"` |
 | `default_action` | yes | `"Allow"` or `"Deny"` — applied when no rule matches |
 | `tools` | yes | All known tool names. The expansion universe for glob patterns |
+| `roles` | yes | All recognised role names. Every role referenced in rules must appear here |
 | `rules` | yes | Ordered list of access rules |
 
 Each rule:
@@ -207,28 +212,89 @@ cd perso
 cargo build
 ```
 
-### 2. Validate your policy
+### 2. Working with your policy
+
+The `policy-compiler` CLI offers three subcommands depending on what you need:
+
+---
+
+#### Option 1 — Validate only
+
+Parse and semantically check a policy file without producing any output. Use this in CI or whenever you want to verify a policy change before committing.
+
+Two validation layers run in sequence:
+
+1. **JSON Schema** — checks structure, field types, enum values, and duplicate entries against the bundled `policy.schema.json`
+2. **Semantic checks** — verifies that every `tool_name` in a rule exists in `tools[]`, every role in a rule exists in `roles[]`, and glob patterns match at least one tool
 
 ```bash
-cargo run -p policy-compiler -- validate --policy policies/example.json
+cargo run -p policy-compiler -- validate --policy policies/myapp.json
+```
+
+Output on success:
+```
+perso: validating policies/myapp.json
+ok: 4 rule(s), 4 tool(s), 4 map entries, 0 warning(s)
+```
+
+Output on failure:
+```
+perso: validating policies/myapp.json
+error: rule references tool 'read_folder' which is not listed in tools[]
+```
+
+---
+
+#### Option 2 — Build the WASM engine only
+
+Compile the policy-runtime engine to a WASM binary without involving a policy file at all. The policy JSON is **not embedded** in the binary — it is loaded separately at runtime via `init()`.
+
+Use this when the engine itself has changed (Rust code updates) and you already know your policy is valid, or when you want to build the engine once and use it with multiple different policy files.
+
+```bash
+cargo run -p policy-compiler -- build --output dist/policy_runtime.wasm
 ```
 
 Output:
 ```
-perso: validating policies/example.json
-  glob 'glob_tool_*' → 2 tool(s) × 1 role(s) = 2 map entries
-ok: 10 rule(s), 13 tool(s), 13 map entries, 0 warning(s)
+perso: building policy-runtime → wasm32-unknown-unknown
+note:  policy JSON is not embedded — pass it to init() at runtime
+ok: 1234567 bytes → dist/policy_runtime.wasm
 ```
 
-### 3. Build the WASM binary
+---
+
+#### Option 3 — Validate then build (recommended)
+
+Validate the policy first and only compile the WASM engine if validation passes. This is the recommended command for most workflows — it catches policy errors before spending time on a cargo build.
 
 ```bash
-cargo run -p policy-compiler -- build \
-  --policy policies/example.json \
+cargo run -p policy-compiler -- validate-and-build \
+  --policy policies/myapp.json \
   --output dist/policy_runtime.wasm
 ```
 
-### 4. Run the test suite
+Output on success:
+```
+perso: validating policy before build…
+perso: validating policies/myapp.json
+ok: 4 rule(s), 4 tool(s), 4 map entries, 0 warning(s)
+perso: policy valid — proceeding to build…
+perso: building policy-runtime → wasm32-unknown-unknown
+note:  policy JSON is not embedded — pass it to init() at runtime
+ok: 1234567 bytes → dist/policy_runtime.wasm
+```
+
+Output when policy is invalid (build is skipped):
+```
+perso: validating policy before build…
+perso: validating policies/myapp.json
+error: rule references tool 'read_folder' which is not listed in tools[]
+```
+
+---
+
+### 3. Run the test suite
 
 ```bash
 # Native tests (no WASM binary needed)
@@ -238,11 +304,39 @@ cargo test -p policy-test
 PERSO_WASM=dist/policy_runtime.wasm cargo test -p policy-test
 ```
 
-### 5. Run all tests across the workspace
+### 4. Run all tests across the workspace
 
 ```bash
 cargo test
 ```
+
+---
+
+## Policy validation in depth
+
+### JSON Schema (`policy.schema.json`)
+
+The bundled schema is compiled into the `policy-compiler` binary at build time via `include_str!`. No external schema file is needed at runtime. It catches:
+
+- Missing required fields (`version`, `default_action`, `tools`, `roles`, `rules`)
+- Wrong `default_action` value (must be `"Allow"` or `"Deny"`)
+- `version` not matching the `perso-x.y.z` pattern
+- Unknown top-level fields
+- Duplicate tool or role names
+- Tool and role names with invalid characters
+- Malformed condition objects (wrong operator names, missing fields)
+- `All` / `Any` combinators with fewer than 2 conditions
+
+### Semantic checks (`run_validate`)
+
+Run after the schema passes, these checks require understanding relationships between fields:
+
+- Concrete `tool_name` in a rule must exist in `tools[]` — hard error
+- Every role referenced in a rule must exist in `roles[]` — hard error
+- Glob patterns that match zero tools in `tools[]` — warning (build proceeds)
+- Rules with an empty `roles[]` array — warning (build proceeds)
+
+The schema and semantic checks are complementary. The schema handles structure; the compiler handles meaning. Neither alone is sufficient.
 
 ---
 
@@ -259,7 +353,7 @@ let mut store = Store::new(&engine, ());
 let instance = linker.instantiate(&mut store, &module)?;
 
 // Initialise with the policy JSON (call again to hot-reload)
-let policy_json = std::fs::read_to_string("policies/example.json")?;
+let policy_json = std::fs::read_to_string("policies/myapp.json")?;
 // write policy_json into WASM memory via alloc, call init(), read response
 
 // On every tool call:
@@ -279,14 +373,14 @@ See `crates/policy-test/src/lib.rs` (`mod wasm_tests`) for a complete, working `
 
 No extra packages needed — Node.js has built-in `WebAssembly` support.
 
-The WASM binary contains **no policy**. You load `policy_runtime.wasm` (the engine) and `example.json` (the policy) separately, then pass the policy JSON to `init()` at startup.
+The WASM binary contains **no policy**. You load `policy_runtime.wasm` (the engine) and your policy JSON separately, then pass the policy JSON to `init()` at startup.
 
 ```js
 const fs = require('fs');
 
 // ── 1. Load the engine and the policy ────────────────────────────────────────
 const wasmBytes  = fs.readFileSync('dist/policy_runtime.wasm');
-const policyJson = fs.readFileSync('policies/example.json', 'utf8');
+const policyJson = fs.readFileSync('policies/myapp.json', 'utf8');
 
 const { instance } = await WebAssembly.instantiate(wasmBytes);
 const { alloc, dealloc, init, evaluate, memory } = instance.exports;
@@ -375,7 +469,7 @@ linker   = Linker(engine)
 store    = Store(engine)
 instance = linker.instantiate(store, module)
 
-with open('policies/example.json', 'r') as f:
+with open('policies/myapp.json', 'r') as f:
     policy_json = f.read()
 
 alloc   = instance.exports(store)['alloc']
@@ -408,7 +502,6 @@ print(resp)
 # {'ok': True}
 
 # ── 4. Evaluate a tool call ───────────────────────────────────────────────────
-# Call this on every LLM tool call before forwarding to MCP.
 def check_tool_call(tool_name: str, args: dict, role: str,
                     agent_attrs: dict = {}, resource_attrs: dict = {}) -> dict:
     tp, tl = write_string(tool_name)
@@ -434,7 +527,6 @@ print(check_tool_call('dangerous_delete', {}, 'viewer'))
 # {'decision': 'Deny', 'reason': "no rule matched...applying default_action"}
 
 # ── 5. Hot-reload the policy ──────────────────────────────────────────────────
-# Call init_fn() again at any time with new JSON — no restart needed.
 with open('policies/updated.json', 'r') as f:
     new_policy_json = f.read()
 

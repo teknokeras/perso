@@ -31,21 +31,23 @@ struct Cli {
 enum Cmd {
     /// Parse a policy JSON file and report any errors. No WASM is produced.
     Validate {
-        /// Path to the policy JSON file
         #[arg(short, long)]
         policy: PathBuf,
     },
 
-    /// Compile a policy-runtime WASM binary.
-    ///
-    /// Requires the `wasm32-unknown-unknown` target:
-    ///   rustup target add wasm32-unknown-unknown
+    /// Compile the policy-runtime engine to WASM.
+    /// The policy JSON is NOT embedded — load it separately via init() at runtime.
     Build {
-        /// Path to the policy JSON file (validated before building)
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
+    /// Validate a policy JSON file, then compile the engine to WASM only if valid.
+    /// The policy JSON is NOT embedded — load it separately via init() at runtime.
+    ValidateAndBuild {
         #[arg(short, long)]
         policy: PathBuf,
 
-        /// Destination path for the compiled .wasm file
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -58,7 +60,15 @@ fn main() -> ExitCode {
 
     let ok = match cli.command {
         Cmd::Validate { policy } => run_validate(&policy),
-        Cmd::Build { policy, output } => run_build(&policy, &output),
+        Cmd::Build { output } => run_build(&output),
+        Cmd::ValidateAndBuild { policy, output } => {
+            println!("perso: validating policy before build…");
+            if !run_validate(&policy) {
+                return ExitCode::FAILURE;
+            }
+            println!("perso: policy valid — proceeding to build…");
+            run_build(&output)
+        }
     };
 
     if ok {
@@ -208,18 +218,11 @@ fn run_validate(policy_path: &PathBuf) -> bool {
 // ─── build ────────────────────────────────────────────────────────────────────
 
 /// Returns `true` on success, `false` on any hard error.
-fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
-    // 1. Validate policy first — fail fast before invoking cargo
-    println!("perso: validating policy before build…");
-    if !run_validate(policy_path) {
-        return false;
-    }
-
-    // 2. Resolve workspace root from this binary's compile-time manifest dir
+fn run_build(output_path: &PathBuf) -> bool {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
-        .parent() // crates/
-        .and_then(|p| p.parent()) // workspace root
+        .parent()
+        .and_then(|p| p.parent())
         .unwrap_or(&manifest_dir)
         .to_path_buf();
 
@@ -227,8 +230,8 @@ fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
         "perso: building policy-runtime → wasm32-unknown-unknown (workspace: {})",
         workspace_root.display()
     );
+    println!("note:  policy JSON is not embedded — pass it to init() at runtime");
 
-    // 3. Invoke cargo
     let status = Command::new("cargo")
         .args([
             "build",
@@ -255,7 +258,6 @@ fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
         Ok(_) => {}
     }
 
-    // 4. Locate the produced .wasm artifact
     let wasm_src = workspace_root
         .join("target")
         .join("wasm32-unknown-unknown")
@@ -270,7 +272,6 @@ fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
         return false;
     }
 
-    // 5. Create output directory if needed
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
             if let Err(e) = std::fs::create_dir_all(parent) {
@@ -283,7 +284,6 @@ fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
         }
     }
 
-    // 6. Copy to output path
     match std::fs::copy(&wasm_src, output_path) {
         Ok(bytes) => {
             println!("ok: {} bytes → {}", bytes, output_path.display());

@@ -13,3 +13,4 @@ policy-runtime = { path = "../policy-runtime" }
 serde_json     = { workspace = true }
 clap           = { workspace = true }
 anyhow         = { workspace = true }
+boon           = { workspace = true }

@@ -18,6 +18,8 @@ pub struct Policy {
     /// Used as the expansion universe for glob patterns in rules.
     pub tools: Vec<String>,
 
+    pub roles: Vec<String>,
+
     /// Ordered list of access rules.
     pub rules: Vec<Rule>,
 }
@@ -203,7 +205,11 @@ mod tests {
     #[test]
     fn rule_with_null_condition_deserializes() {
         let policy = parse_policy(EXAMPLE).unwrap();
-        let read_file = policy.rules.iter().find(|r| r.tool_name == "read_file").unwrap();
+        let read_file = policy
+            .rules
+            .iter()
+            .find(|r| r.tool_name == "read_file")
+            .unwrap();
         assert!(read_file.condition.is_none());
         assert_eq!(read_file.roles, vec!["viewer"]);
     }
@@ -211,7 +217,11 @@ mod tests {
     #[test]
     fn numeric_check_condition_deserializes() {
         let policy = parse_policy(EXAMPLE).unwrap();
-        let refund = policy.rules.iter().find(|r| r.tool_name == "refund_user").unwrap();
+        let refund = policy
+            .rules
+            .iter()
+            .find(|r| r.tool_name == "refund_user")
+            .unwrap();
         match refund.condition.as_ref().unwrap() {
             Condition::NumericCheck(nc) => {
                 assert_eq!(nc.field, "amount");
@@ -226,7 +236,11 @@ mod tests {
     #[test]
     fn string_check_not_in_deserializes() {
         let policy = parse_policy(EXAMPLE).unwrap();
-        let rule = policy.rules.iter().find(|r| r.tool_name == "read_restricted").unwrap();
+        let rule = policy
+            .rules
+            .iter()
+            .find(|r| r.tool_name == "read_restricted")
+            .unwrap();
         match rule.condition.as_ref().unwrap() {
             Condition::StringCheck(sc) => {
                 assert_eq!(sc.op, StringOp::NotIn);
@@ -239,7 +253,11 @@ mod tests {
     #[test]
     fn field_present_deserializes() {
         let policy = parse_policy(EXAMPLE).unwrap();
-        let rule = policy.rules.iter().find(|r| r.tool_name == "sensitive_tool").unwrap();
+        let rule = policy
+            .rules
+            .iter()
+            .find(|r| r.tool_name == "sensitive_tool")
+            .unwrap();
         match rule.condition.as_ref().unwrap() {
             Condition::FieldPresent(fp) => {
                 assert_eq!(fp.field, "session_token");
@@ -252,17 +270,19 @@ mod tests {
     #[test]
     fn field_equals_deserializes() {
         let policy = parse_policy(EXAMPLE).unwrap();
-        let rule = policy.rules.iter().find(|r| r.tool_name == "edit_document").unwrap();
+        let rule = policy
+            .rules
+            .iter()
+            .find(|r| r.tool_name == "edit_document")
+            .unwrap();
         match rule.condition.as_ref().unwrap() {
-            Condition::Any(children) => {
-                match &children[0] {
-                    Condition::FieldEquals(fe) => {
-                        assert_eq!(fe.field_a, "user_id");
-                        assert_eq!(fe.field_b, "owner_id");
-                    }
-                    other => panic!("expected FieldEquals, got {other:?}"),
+            Condition::Any(children) => match &children[0] {
+                Condition::FieldEquals(fe) => {
+                    assert_eq!(fe.field_a, "user_id");
+                    assert_eq!(fe.field_b, "owner_id");
                 }
-            }
+                other => panic!("expected FieldEquals, got {other:?}"),
+            },
             other => panic!("expected Any, got {other:?}"),
         }
     }
@@ -270,7 +290,11 @@ mod tests {
     #[test]
     fn all_condition_deserializes() {
         let policy = parse_policy(EXAMPLE).unwrap();
-        let rule = policy.rules.iter().find(|r| r.tool_name == "guarded_tool").unwrap();
+        let rule = policy
+            .rules
+            .iter()
+            .find(|r| r.tool_name == "guarded_tool")
+            .unwrap();
         match rule.condition.as_ref().unwrap() {
             Condition::All(children) => assert_eq!(children.len(), 2),
             other => panic!("expected All, got {other:?}"),
@@ -280,7 +304,11 @@ mod tests {
     #[test]
     fn not_condition_deserializes() {
         let policy = parse_policy(EXAMPLE).unwrap();
-        let rule = policy.rules.iter().find(|r| r.tool_name == "open_tool").unwrap();
+        let rule = policy
+            .rules
+            .iter()
+            .find(|r| r.tool_name == "open_tool")
+            .unwrap();
         match rule.condition.as_ref().unwrap() {
             Condition::Not(_) => {}
             other => panic!("expected Not, got {other:?}"),
@@ -290,7 +318,11 @@ mod tests {
     #[test]
     fn glob_rule_present() {
         let policy = parse_policy(EXAMPLE).unwrap();
-        let rule = policy.rules.iter().find(|r| r.tool_name == "glob_tool_*").unwrap();
+        let rule = policy
+            .rules
+            .iter()
+            .find(|r| r.tool_name == "glob_tool_*")
+            .unwrap();
         assert_eq!(rule.roles, vec!["admin"]);
         assert!(rule.condition.is_none());
     }

@@ -39,13 +39,14 @@ pub fn expand_globs(policy: &Policy) -> PolicyMap {
 
         for tool in matched_tools {
             for role in &rule.roles {
+                // ✅ NEW: skip roles not declared in policy.roles[]
+                if !policy.roles.contains(role) {
+                    continue;
+                }
                 // Later rules win if the same (tool, role) pair appears twice.
                 // For this design, first-match is fine since the spec doesn't
                 // define precedence; we use insert (last-write wins).
-                map.insert(
-                    (tool.to_string(), role.clone()),
-                    rule.condition.clone(),
-                );
+                map.insert((tool.to_string(), role.clone()), rule.condition.clone());
             }
         }
     }
@@ -114,11 +115,12 @@ mod tests {
     use super::*;
     use policy_core::{DefaultAction, Rule};
 
-    fn make_policy(tools: Vec<&str>, rules: Vec<Rule>) -> Policy {
+    fn make_policy(tools: Vec<&str>, roles: Vec<&str>, rules: Vec<Rule>) -> Policy {
         Policy {
             version: "perso-1.0.0".into(),
             default_action: DefaultAction::Deny,
             tools: tools.into_iter().map(str::to_string).collect(),
+            roles: roles.into_iter().map(str::to_string).collect(),
             rules,
         }
     }
@@ -183,6 +185,7 @@ mod tests {
     fn expand_concrete_rule() {
         let policy = make_policy(
             vec!["read_file", "write_file"],
+            vec!["viewer"],
             vec![simple_rule("read_file", vec!["viewer"])],
         );
         let map = expand_globs(&policy);
@@ -194,6 +197,7 @@ mod tests {
     fn expand_glob_rule_hits_two_tools() {
         let policy = make_policy(
             vec!["glob_tool_alpha", "glob_tool_beta", "other_tool"],
+            vec!["admin"],
             vec![simple_rule("glob_tool_*", vec!["admin"])],
         );
         let map = expand_globs(&policy);
@@ -206,6 +210,7 @@ mod tests {
     fn expand_glob_multiple_roles() {
         let policy = make_policy(
             vec!["tool_a", "tool_b"],
+            vec!["viewer", "admin"],
             vec![simple_rule("tool_*", vec!["viewer", "admin"])],
         );
         let map = expand_globs(&policy);
@@ -219,6 +224,7 @@ mod tests {
     fn expand_no_glob_match_produces_empty_map() {
         let policy = make_policy(
             vec!["other_tool"],
+            vec!["admin"],
             vec![simple_rule("glob_tool_*", vec!["admin"])],
         );
         let map = expand_globs(&policy);
@@ -230,6 +236,7 @@ mod tests {
         // Concrete names bypass the tools[] universe check
         let policy = make_policy(
             vec![], // empty tools list
+            vec!["viewer"],
             vec![simple_rule("read_file", vec!["viewer"])],
         );
         let map = expand_globs(&policy);
@@ -258,5 +265,19 @@ mod tests {
         assert!(map.contains_key(&("open_tool".into(), "viewer".into())));
         assert!(map.contains_key(&("open_tool".into(), "supervisor".into())));
         assert!(map.contains_key(&("open_tool".into(), "admin".into())));
+    }
+
+    #[test]
+    fn expand_unknown_role_is_skipped() {
+        let policy = make_policy(
+            vec!["read_file"],
+            vec!["viewer"], // "ghost" is not declared
+            vec![simple_rule("read_file", vec!["viewer", "ghost"])],
+        );
+        let map = expand_globs(&policy);
+        // known role is inserted
+        assert!(map.contains_key(&("read_file".into(), "viewer".into())));
+        // unknown role is silently skipped by the expander
+        assert!(!map.contains_key(&("read_file".into(), "ghost".into())));
     }
 }

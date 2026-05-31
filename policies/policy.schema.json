@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perso/policy.schema.json",
+  "title": "Perso Policy",
+  "description": "Policy enforcement schema for perso MCP tool call authorization",
+  "type": "object",
+  "required": ["version", "default_action", "tools", "roles", "rules"],
+  "additionalProperties": false,
+  "properties": {
+
+    "version": {
+      "type": "string",
+      "pattern": "^perso-\\d+\\.\\d+\\.\\d+$",
+      "description": "Schema version, e.g. perso-1.0.0"
+    },
+
+    "default_action": {
+      "type": "string",
+      "enum": ["Allow", "Deny"],
+      "description": "Action applied when no rule matches the tool call"
+    },
+
+    "tools": {
+      "type": "array",
+      "description": "All known tool names. The expansion universe for glob patterns in rules",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-zA-Z0-9_]+$",
+        "description": "Tool names must be alphanumeric + underscore, no wildcards"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+
+    "roles": {
+      "type": "array",
+      "description": "All recognized roles. Every role referenced in rules must appear here",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[a-zA-Z0-9_]+$",
+        "description": "Role names must be alphanumeric + underscore"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+
+    "rules": {
+      "type": "array",
+      "description": "Ordered list of access rules",
+      "items": { "$ref": "#/$defs/Rule" },
+      "minItems": 1
+    }
+  },
+
+  "$defs": {
+
+    "Rule": {
+      "type": "object",
+      "required": ["tool_name", "roles", "condition"],
+      "additionalProperties": false,
+      "properties": {
+        "tool_name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9_*]+$",
+          "description": "Concrete tool name or glob pattern. Only * wildcard is supported"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Roles this rule grants access to. Must be declared in top-level roles[]"
+        },
+        "condition": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/Condition" }
+          ],
+          "description": "null for unconditional access, or a condition tree"
+        }
+      }
+    },
+
+    "Condition": {
+      "oneOf": [
+        { "$ref": "#/$defs/NumericCheck" },
+        { "$ref": "#/$defs/StringCheck" },
+        { "$ref": "#/$defs/FieldPresent" },
+        { "$ref": "#/$defs/FieldEquals" },
+        { "$ref": "#/$defs/All" },
+        { "$ref": "#/$defs/Any" },
+        { "$ref": "#/$defs/Not" }
+      ]
+    },
+
+    "Source": {
+      "type": "string",
+      "enum": ["Arguments", "AgentAttributes", "ResourceAttributes"],
+      "description": "Which JSON bag the condition reads its field from"
+    },
+
+    "NumericOp": {
+      "type": "string",
+      "enum": ["Lte", "Gte", "Eq", "Lt", "Gt"],
+      "description": "Numeric comparison operator"
+    },
+
+    "StringOp": {
+      "type": "string",
+      "enum": ["In", "NotIn"],
+      "description": "String membership operator"
+    },
+
+    "NumericCheck": {
+      "type": "object",
+      "required": ["NumericCheck"],
+      "additionalProperties": false,
+      "properties": {
+        "NumericCheck": {
+          "type": "object",
+          "required": ["source", "field", "op", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "source": { "$ref": "#/$defs/Source" },
+            "field":  { "type": "string", "minLength": 1 },
+            "op":     { "$ref": "#/$defs/NumericOp" },
+            "value":  { "type": "number" }
+          }
+        }
+      }
+    },
+
+    "StringCheck": {
+      "type": "object",
+      "required": ["StringCheck"],
+      "additionalProperties": false,
+      "properties": {
+        "StringCheck": {
+          "type": "object",
+          "required": ["source", "field", "op", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "source": { "$ref": "#/$defs/Source" },
+            "field":  { "type": "string", "minLength": 1 },
+            "op":     { "$ref": "#/$defs/StringOp" },
+            "value": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          }
+        }
+      }
+    },
+
+    "FieldPresent": {
+      "type": "object",
+      "required": ["FieldPresent"],
+      "additionalProperties": false,
+      "properties": {
+        "FieldPresent": {
+          "type": "object",
+          "required": ["source", "field"],
+          "additionalProperties": false,
+          "properties": {
+            "source": { "$ref": "#/$defs/Source" },
+            "field":  { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+
+    "FieldEquals": {
+      "type": "object",
+      "required": ["FieldEquals"],
+      "additionalProperties": false,
+      "properties": {
+        "FieldEquals": {
+          "type": "object",
+          "required": ["source_a", "field_a", "source_b", "field_b"],
+          "additionalProperties": false,
+          "properties": {
+            "source_a": { "$ref": "#/$defs/Source" },
+            "field_a":  { "type": "string", "minLength": 1 },
+            "source_b": { "$ref": "#/$defs/Source" },
+            "field_b":  { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+
+    "All": {
+      "type": "object",
+      "required": ["All"],
+      "additionalProperties": false,
+      "properties": {
+        "All": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Condition" },
+          "minItems": 2,
+          "description": "All conditions must pass"
+        }
+      }
+    },
+
+    "Any": {
+      "type": "object",
+      "required": ["Any"],
+      "additionalProperties": false,
+      "properties": {
+        "Any": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Condition" },
+          "minItems": 2,
+          "description": "At least one condition must pass"
+        }
+      }
+    },
+
+    "Not": {
+      "type": "object",
+      "required": ["Not"],
+      "additionalProperties": false,
+      "properties": {
+        "Not": { "$ref": "#/$defs/Condition" }
+      }
+    }
+
+  }
+}

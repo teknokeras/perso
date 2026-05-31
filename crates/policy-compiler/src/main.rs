@@ -11,6 +11,9 @@ use clap::{Parser, Subcommand};
 use policy_core::parse_policy;
 use policy_runtime::expander::expand_globs;
 
+use boon::{Compiler, Schemas};
+use serde_json::Value;
+
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
 #[derive(Parser)]
@@ -54,14 +57,42 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let ok = match cli.command {
-        Cmd::Validate { policy }         => run_validate(&policy),
-        Cmd::Build    { policy, output } => run_build(&policy, &output),
+        Cmd::Validate { policy } => run_validate(&policy),
+        Cmd::Build { policy, output } => run_build(&policy, &output),
     };
 
-    if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 // ─── validate ─────────────────────────────────────────────────────────────────
+
+// Embed the schema at compile time — no external file dependency at runtime
+const POLICY_SCHEMA: &str = include_str!("../../../policies/policy.schema.json");
+
+fn validate_schema(json: &str) -> Result<(), String> {
+    let instance: Value = serde_json::from_str(json).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    let schema_value: Value = serde_json::from_str(POLICY_SCHEMA).expect("bundled schema is valid");
+
+    let mut schemas = Schemas::new();
+    let mut compiler = Compiler::new();
+
+    compiler
+        .add_resource("policy.schema.json", schema_value)
+        .map_err(|e| format!("schema compile error: {e}"))?;
+
+    let schema_id = compiler
+        .compile("policy.schema.json", &mut schemas)
+        .map_err(|e| format!("schema compile error: {e}"))?;
+
+    schemas
+        .validate(&instance, schema_id)
+        .map_err(|e| format!("{e}"))
+}
 
 /// Returns `true` on success, `false` on any hard error.
 fn run_validate(policy_path: &PathBuf) -> bool {
@@ -76,7 +107,13 @@ fn run_validate(policy_path: &PathBuf) -> bool {
         }
     };
 
-    // 2. Parse JSON
+    // 2. ✅ NEW: JSON Schema check — catches structural/type errors first
+    if let Err(e) = validate_schema(&json) {
+        eprintln!("error: policy failed schema validation: {e}");
+        return false;
+    }
+
+    // 3. Semantic parse — now safe to call, structure is guaranteed correct
     let policy = match parse_policy(&json) {
         Ok(p) => p,
         Err(e) => {
@@ -85,7 +122,7 @@ fn run_validate(policy_path: &PathBuf) -> bool {
         }
     };
 
-    // 3. Basic field checks
+    // 4. Basic field checks
     if policy.version.is_empty() {
         eprintln!("error: 'version' field is empty");
         return false;
@@ -96,12 +133,25 @@ fn run_validate(policy_path: &PathBuf) -> bool {
     if policy.rules.is_empty() {
         eprintln!("warning: 'rules' array is empty — all calls will hit default_action");
     }
+    if policy.roles.is_empty() {
+        eprintln!("warning: 'roles' array is empty — no rules can ever match");
+    }
 
-    // 4. Glob expansion — report unmatched patterns and empty-role rules
+    // 5. Glob expansion — report unmatched patterns and empty-role rules
     let map = expand_globs(&policy);
     let mut warnings = 0usize;
 
     for rule in &policy.rules {
+        for role in &rule.roles {
+            if !policy.roles.contains(role) {
+                eprintln!(
+                    "error: rule for '{}' references role '{}' which is not listed in roles[]",
+                    rule.tool_name, role
+                );
+                return false;
+            }
+        }
+
         if rule.tool_name.contains('*') {
             let matched = policy
                 .tools
@@ -123,6 +173,15 @@ fn run_validate(policy_path: &PathBuf) -> bool {
                     rule.roles.len(),
                     matched * rule.roles.len()
                 );
+            }
+        } else {
+            // ✅ NEW: concrete name must exist in tools[]
+            if !policy.tools.contains(&rule.tool_name) {
+                eprintln!(
+                    "error: rule references tool '{}' which is not listed in tools[]",
+                    rule.tool_name
+                );
+                return false; // hard error, not a warning
             }
         }
 
@@ -157,9 +216,9 @@ fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
     }
 
     // 2. Resolve workspace root from this binary's compile-time manifest dir
-    let manifest_dir  = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
-        .parent()          // crates/
+        .parent() // crates/
         .and_then(|p| p.parent()) // workspace root
         .unwrap_or(&manifest_dir)
         .to_path_buf();
@@ -174,8 +233,10 @@ fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
         .args([
             "build",
             "--release",
-            "--target", "wasm32-unknown-unknown",
-            "-p", "policy-runtime",
+            "--target",
+            "wasm32-unknown-unknown",
+            "-p",
+            "policy-runtime",
         ])
         .current_dir(&workspace_root)
         .status();
@@ -188,9 +249,7 @@ fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
         }
         Ok(s) if !s.success() => {
             eprintln!("error: cargo build failed (exit {})", s);
-            eprintln!(
-                "hint:  install the WASM target: rustup target add wasm32-unknown-unknown"
-            );
+            eprintln!("hint:  install the WASM target: rustup target add wasm32-unknown-unknown");
             return false;
         }
         Ok(_) => {}
@@ -227,11 +286,7 @@ fn run_build(policy_path: &PathBuf, output_path: &PathBuf) -> bool {
     // 6. Copy to output path
     match std::fs::copy(&wasm_src, output_path) {
         Ok(bytes) => {
-            println!(
-                "ok: {} bytes → {}",
-                bytes,
-                output_path.display()
-            );
+            println!("ok: {} bytes → {}", bytes, output_path.display());
             true
         }
         Err(e) => {
@@ -250,8 +305,7 @@ mod tests {
 
     fn example_policy_path() -> PathBuf {
         // CARGO_MANIFEST_DIR is crates/policy-compiler at test time
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../policies/example.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../policies/example.json")
     }
 
     #[test]
@@ -261,7 +315,9 @@ mod tests {
 
     #[test]
     fn validate_missing_file_fails() {
-        assert!(!run_validate(&PathBuf::from("/nonexistent/path/policy.json")));
+        assert!(!run_validate(&PathBuf::from(
+            "/nonexistent/path/policy.json"
+        )));
     }
 
     #[test]

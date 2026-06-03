@@ -8,6 +8,18 @@ The LLM never touches auth. The host owns the role. perso makes the Allow/Deny c
 
 ---
 
+## Demo
+
+**[perso-demo](https://github.com/teknokeras/perso-demo)** is an interactive web app that shows perso in action.
+
+An LLM (Groq) chats with the user and calls file tools. perso intercepts every tool call intent before execution and returns Allow or Deny based on the caller's role. The UI shows the decision inline — green for allow, red for deny — alongside the reason from the policy engine.
+
+Try three roles (viewer, supervisor, admin) and watch which tool calls get through and which get blocked — without touching a single line of auth code in the tool implementations.
+
+→ **[github.com/teknokeras/perso-demo](https://github.com/teknokeras/perso-demo)**
+
+---
+
 ## The problem perso solves
 
 When an LLM calls a tool through MCP, something has to decide whether that call is allowed. Without a policy layer, the choices are bad: either every tool is wide open, or you scatter auth logic across individual tool implementations, or you bolt on coarse-grained role checks with no ability to inspect arguments.
@@ -46,12 +58,11 @@ The LLM returns a tool call intent. The backend intercepts it, builds a context 
 perso/
 ├── Cargo.toml                  # workspace root — all shared deps declared here
 ├── policies/
-│   ├── example.json            # ready-to-use example policy
-│   └── policy.schema.json      # JSON Schema for policy validation
+│   └── example.json            # ready-to-use example policy
 └── crates/
     ├── policy-core/            # shared types, serde AST, parse_policy()
     ├── policy-runtime/         # glob expander, condition evaluator, WASM exports
-    ├── policy-compiler/        # CLI: validate, build, and validate-and-build commands
+    ├── policy-compiler/        # CLI: validate and build commands
     └── policy-test/            # integration test suite
 ```
 
@@ -63,7 +74,7 @@ perso/
 
 The shared data model. Every other crate depends on it. Contains:
 
-- `Policy` — the top-level document (version, default_action, tools, roles, rules)
+- `Policy` — the top-level document (version, default_action, tools, rules)
 - `Rule` — a single access rule: tool name (or glob), roles, optional condition
 - `Condition` — a recursive enum: `All`, `Any`, `Not`, `NumericCheck`, `StringCheck`, `FieldPresent`, `FieldEquals`
 - `Source` — where a condition reads its data from: `Arguments`, `AgentAttributes`, or `ResourceAttributes`
@@ -83,12 +94,12 @@ The evaluation engine, compiled to `cdylib` for WASM. Three modules:
 
 **`wasm`** — the WASM ABI layer. Exports four functions to the host:
 
-| Export | Signature | Purpose |
-|--------|-----------|---------|
-| `alloc` | `(len: i32) → i32` | Host calls this to allocate memory before writing input strings |
-| `dealloc` | `(ptr: i32, len: i32)` | Host calls this to free buffers after reading responses |
-| `init` | `(ptr: i32, len: i32) → i32` | Load and materialise a policy JSON string |
-| `evaluate` | `(6× i32) → i32` | Evaluate a tool call; returns a length-prefixed JSON buffer |
+| Export     | Signature                    | Purpose                                                         |
+| ---------- | ---------------------------- | --------------------------------------------------------------- |
+| `alloc`    | `(len: i32) → i32`           | Host calls this to allocate memory before writing input strings |
+| `dealloc`  | `(ptr: i32, len: i32)`       | Host calls this to free buffers after reading responses         |
+| `init`     | `(ptr: i32, len: i32) → i32` | Load and materialise a policy JSON string                       |
+| `evaluate` | `(6× i32) → i32`             | Evaluate a tool call; returns a length-prefixed JSON buffer     |
 
 All strings cross the WASM boundary as `(pointer, length)` pairs into linear memory. Return buffers are length-prefixed: the first 4 bytes are a little-endian `u32` containing the body length, followed by UTF-8 JSON. The host reads the length, reads the body, then calls `dealloc`.
 
@@ -96,13 +107,11 @@ Policy state is held in a `OnceLock<Mutex<PolicyState>>`. Calling `init` again r
 
 ### policy-compiler
 
-A CLI with three subcommands.
+A CLI with two subcommands.
 
-**`validate`** — runs the JSON Schema check followed by semantic validation (parse, glob-expand, cross-reference tools and roles). Reports all warnings and errors without producing any output file. Useful in CI.
+**`validate`** — parses the policy JSON, expands all globs, and reports warnings and errors without producing any output file. Useful in CI.
 
-**`build`** — compiles the policy-runtime engine to WASM without requiring a policy file. Invokes `cargo build --release --target wasm32-unknown-unknown -p policy-runtime` and copies the resulting `.wasm` to the path you specify. The policy JSON is **not** embedded in the binary — it is loaded separately at runtime via `init()`.
-
-**`validate-and-build`** — runs `validate` first and only proceeds to `build` if the policy is valid. The recommended command for most workflows: catches policy errors before spending time on a cargo build.
+**`build`** — validates the policy, then invokes `cargo build --release --target wasm32-unknown-unknown -p policy-runtime`, and copies the resulting `.wasm` to the path you specify.
 
 ### policy-test
 
@@ -121,7 +130,6 @@ The integration test suite, split into two layers:
   "version": "perso-1.0.0",
   "default_action": "Deny",
   "tools": ["read_file", "write_file", "glob_tool_alpha", "glob_tool_beta"],
-  "roles": ["viewer", "supervisor", "admin"],
   "rules": [
     { "tool_name": "read_file", "roles": ["viewer"], "condition": null },
     { "tool_name": "glob_tool_*", "roles": ["admin"], "condition": null }
@@ -129,51 +137,57 @@ The integration test suite, split into two layers:
 }
 ```
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `version` | yes | Schema version string, e.g. `"perso-1.0.0"` |
-| `default_action` | yes | `"Allow"` or `"Deny"` — applied when no rule matches |
-| `tools` | yes | All known tool names. The expansion universe for glob patterns |
-| `roles` | yes | All recognised role names. Every role referenced in rules must appear here |
-| `rules` | yes | Ordered list of access rules |
+| Field            | Required | Description                                                    |
+| ---------------- | -------- | -------------------------------------------------------------- |
+| `version`        | yes      | Schema version string, e.g. `"perso-1.0.0"`                   |
+| `default_action` | yes      | `"Allow"` or `"Deny"` — applied when no rule matches          |
+| `tools`          | yes      | All known tool names. The expansion universe for glob patterns |
+| `rules`          | yes      | Ordered list of access rules                                   |
 
 Each rule:
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `tool_name` | yes | Concrete name or glob pattern (`*` wildcard only) |
-| `roles` | yes | List of role strings that this rule grants access to |
-| `condition` | yes | `null` for unconditional access, or a condition object |
+| Field       | Required | Description                                            |
+| ----------- | -------- | ------------------------------------------------------ |
+| `tool_name` | yes      | Concrete name or glob pattern (`*` wildcard only)      |
+| `roles`     | yes      | List of role strings that this rule grants access to   |
+| `condition` | yes      | `null` for unconditional access, or a condition object |
 
 ### Condition types
 
 **`NumericCheck`** — compare a numeric field to a literal value.
+
 ```json
 { "NumericCheck": { "source": "Arguments", "field": "amount", "op": "Lte", "value": 500.0 } }
 ```
+
 Operators: `Lte`, `Gte`, `Eq`, `Lt`, `Gt`
 
 **`StringCheck`** — check whether a string field is in or not in a list.
+
 ```json
 { "StringCheck": { "source": "Arguments", "field": "path", "op": "NotIn", "value": ["/etc/passwd"] } }
 ```
+
 Operators: `In`, `NotIn`
 
 **`FieldPresent`** — assert a field exists and is not null.
+
 ```json
 { "FieldPresent": { "source": "AgentAttributes", "field": "session_token" } }
 ```
 
 **`FieldEquals`** — assert a field in one source equals a field in another.
+
 ```json
 { "FieldEquals": { "source_a": "AgentAttributes", "field_a": "user_id", "source_b": "ResourceAttributes", "field_b": "owner_id" } }
 ```
 
 **`All`**, **`Any`**, **`Not`** — logical combinators.
+
 ```json
-{ "All": [ <condition>, <condition> ] }
-{ "Any": [ <condition>, <condition> ] }
-{ "Not": <condition> }
+{ "All": [ "<condition>", "<condition>" ] }
+{ "Any": [ "<condition>", "<condition>" ] }
+{ "Not": "<condition>" }
 ```
 
 **Source values:** `"Arguments"` (tool call args from the LLM), `"AgentAttributes"` (caller session data), `"ResourceAttributes"` (the resource being acted on).
@@ -200,103 +214,43 @@ This expands into two map entries: `(glob_tool_alpha, admin)` and `(glob_tool_be
 - Rust (stable, 1.75+)
 - `wasm32-unknown-unknown` target for compiling the WASM binary:
 
-```bash
+```
 rustup target add wasm32-unknown-unknown
 ```
 
 ### 1. Clone and build
 
-```bash
-git clone <repo-url>
+```
+git clone https://github.com/teknokeras/perso.git
 cd perso
 cargo build
 ```
 
-### 2. Working with your policy
+### 2. Validate your policy
 
-The `policy-compiler` CLI offers three subcommands depending on what you need:
-
----
-
-#### Option 1 — Validate only
-
-Parse and semantically check a policy file without producing any output. Use this in CI or whenever you want to verify a policy change before committing.
-
-Two validation layers run in sequence:
-
-1. **JSON Schema** — checks structure, field types, enum values, and duplicate entries against the bundled `policy.schema.json`
-2. **Semantic checks** — verifies that every `tool_name` in a rule exists in `tools[]`, every role in a rule exists in `roles[]`, and glob patterns match at least one tool
-
-```bash
-cargo run -p policy-compiler -- validate --policy policies/myapp.json
 ```
-
-Output on success:
-```
-perso: validating policies/myapp.json
-ok: 4 rule(s), 4 tool(s), 4 map entries, 0 warning(s)
-```
-
-Output on failure:
-```
-perso: validating policies/myapp.json
-error: rule references tool 'read_folder' which is not listed in tools[]
-```
-
----
-
-#### Option 2 — Build the WASM engine only
-
-Compile the policy-runtime engine to a WASM binary without involving a policy file at all. The policy JSON is **not embedded** in the binary — it is loaded separately at runtime via `init()`.
-
-Use this when the engine itself has changed (Rust code updates) and you already know your policy is valid, or when you want to build the engine once and use it with multiple different policy files.
-
-```bash
-cargo run -p policy-compiler -- build --output dist/policy_runtime.wasm
+cargo run -p policy-compiler -- validate --policy policies/example.json
 ```
 
 Output:
+
 ```
-perso: building policy-runtime → wasm32-unknown-unknown
-note:  policy JSON is not embedded — pass it to init() at runtime
-ok: 1234567 bytes → dist/policy_runtime.wasm
+perso: validating policies/example.json
+  glob 'glob_tool_*' → 2 tool(s) × 1 role(s) = 2 map entries
+ok: 10 rule(s), 13 tool(s), 13 map entries, 0 warning(s)
 ```
 
----
+### 3. Build the WASM binary
 
-#### Option 3 — Validate then build (recommended)
-
-Validate the policy first and only compile the WASM engine if validation passes. This is the recommended command for most workflows — it catches policy errors before spending time on a cargo build.
-
-```bash
-cargo run -p policy-compiler -- validate-and-build \
-  --policy policies/myapp.json \
+```
+cargo run -p policy-compiler -- build \
+  --policy policies/example.json \
   --output dist/policy_runtime.wasm
 ```
 
-Output on success:
-```
-perso: validating policy before build…
-perso: validating policies/myapp.json
-ok: 4 rule(s), 4 tool(s), 4 map entries, 0 warning(s)
-perso: policy valid — proceeding to build…
-perso: building policy-runtime → wasm32-unknown-unknown
-note:  policy JSON is not embedded — pass it to init() at runtime
-ok: 1234567 bytes → dist/policy_runtime.wasm
-```
+### 4. Run the test suite
 
-Output when policy is invalid (build is skipped):
 ```
-perso: validating policy before build…
-perso: validating policies/myapp.json
-error: rule references tool 'read_folder' which is not listed in tools[]
-```
-
----
-
-### 3. Run the test suite
-
-```bash
 # Native tests (no WASM binary needed)
 cargo test -p policy-test
 
@@ -304,39 +258,11 @@ cargo test -p policy-test
 PERSO_WASM=dist/policy_runtime.wasm cargo test -p policy-test
 ```
 
-### 4. Run all tests across the workspace
+### 5. Run all tests across the workspace
 
-```bash
+```
 cargo test
 ```
-
----
-
-## Policy validation in depth
-
-### JSON Schema (`policy.schema.json`)
-
-The bundled schema is compiled into the `policy-compiler` binary at build time via `include_str!`. No external schema file is needed at runtime. It catches:
-
-- Missing required fields (`version`, `default_action`, `tools`, `roles`, `rules`)
-- Wrong `default_action` value (must be `"Allow"` or `"Deny"`)
-- `version` not matching the `perso-x.y.z` pattern
-- Unknown top-level fields
-- Duplicate tool or role names
-- Tool and role names with invalid characters
-- Malformed condition objects (wrong operator names, missing fields)
-- `All` / `Any` combinators with fewer than 2 conditions
-
-### Semantic checks (`run_validate`)
-
-Run after the schema passes, these checks require understanding relationships between fields:
-
-- Concrete `tool_name` in a rule must exist in `tools[]` — hard error
-- Every role referenced in a rule must exist in `roles[]` — hard error
-- Glob patterns that match zero tools in `tools[]` — warning (build proceeds)
-- Rules with an empty `roles[]` array — warning (build proceeds)
-
-The schema and semantic checks are complementary. The schema handles structure; the compiler handles meaning. Neither alone is sufficient.
 
 ---
 
@@ -353,7 +279,7 @@ let mut store = Store::new(&engine, ());
 let instance = linker.instantiate(&mut store, &module)?;
 
 // Initialise with the policy JSON (call again to hot-reload)
-let policy_json = std::fs::read_to_string("policies/myapp.json")?;
+let policy_json = std::fs::read_to_string("policies/example.json")?;
 // write policy_json into WASM memory via alloc, call init(), read response
 
 // On every tool call:
@@ -373,14 +299,14 @@ See `crates/policy-test/src/lib.rs` (`mod wasm_tests`) for a complete, working `
 
 No extra packages needed — Node.js has built-in `WebAssembly` support.
 
-The WASM binary contains **no policy**. You load `policy_runtime.wasm` (the engine) and your policy JSON separately, then pass the policy JSON to `init()` at startup.
+The WASM binary contains **no policy**. You load `policy_runtime.wasm` (the engine) and `example.json` (the policy) separately, then pass the policy JSON to `init()` at startup.
 
 ```js
 const fs = require('fs');
 
 // ── 1. Load the engine and the policy ────────────────────────────────────────
 const wasmBytes  = fs.readFileSync('dist/policy_runtime.wasm');
-const policyJson = fs.readFileSync('policies/myapp.json', 'utf8');
+const policyJson = fs.readFileSync('policies/example.json', 'utf8');
 
 const { instance } = await WebAssembly.instantiate(wasmBytes);
 const { alloc, dealloc, init, evaluate, memory } = instance.exports;
@@ -452,7 +378,7 @@ console.log(readResponse(init(rPtr, rLen)));
 
 Install the official Bytecode Alliance wasmtime binding:
 
-```bash
+```
 pip install wasmtime
 ```
 
@@ -469,7 +395,7 @@ linker   = Linker(engine)
 store    = Store(engine)
 instance = linker.instantiate(store, module)
 
-with open('policies/myapp.json', 'r') as f:
+with open('policies/example.json', 'r') as f:
     policy_json = f.read()
 
 alloc   = instance.exports(store)['alloc']
@@ -502,6 +428,7 @@ print(resp)
 # {'ok': True}
 
 # ── 4. Evaluate a tool call ───────────────────────────────────────────────────
+# Call this on every LLM tool call before forwarding to MCP.
 def check_tool_call(tool_name: str, args: dict, role: str,
                     agent_attrs: dict = {}, resource_attrs: dict = {}) -> dict:
     tp, tl = write_string(tool_name)
@@ -527,6 +454,7 @@ print(check_tool_call('dangerous_delete', {}, 'viewer'))
 # {'decision': 'Deny', 'reason': "no rule matched...applying default_action"}
 
 # ── 5. Hot-reload the policy ──────────────────────────────────────────────────
+# Call init_fn() again at any time with new JSON — no restart needed.
 with open('policies/updated.json', 'r') as f:
     new_policy_json = f.read()
 
@@ -581,6 +509,7 @@ Call `init` again with new policy JSON at any time. The `Mutex<PolicyState>` ins
 { "tool_name": "refund_user", "roles": ["supervisor"],
   "condition": { "NumericCheck": { "source": "Arguments", "field": "amount", "op": "Lte", "value": 500.0 } } }
 ```
+
 Supervisors can issue refunds, but only up to $500. A refund of $600 is denied even for a supervisor.
 
 ```json
@@ -591,6 +520,7 @@ Supervisors can issue refunds, but only up to $500. A refund of $600 is denied e
     { "StringCheck": { "source": "AgentAttributes", "field": "role", "op": "In", "value": ["admin"] } }
   ]}}
 ```
+
 Admins can edit a document if they are the owner, or unconditionally if their session role is admin. Either branch passing is enough.
 
 ```json
@@ -600,24 +530,26 @@ Admins can edit a document if they are the owner, or unconditionally if their se
     { "FieldPresent": { "source": "AgentAttributes", "field": "mfa_verified" } }
   ]}}
 ```
+
 Supervisors can use this tool only when the environment is production AND MFA has been verified. Both must pass.
 
 ```json
 { "tool_name": "glob_tool_*", "roles": ["admin"], "condition": null }
 ```
+
 Any tool whose name starts with `glob_tool_` is unconditionally available to admins. The glob is expanded at init time against the `tools[]` array — no wildcard pattern matching at evaluate time.
 
 ---
 
 ## Test coverage summary
 
-| Crate | Tests | What they cover |
-|-------|-------|-----------------|
-| policy-core | 11 | Parsing every condition type, roundtrip serialisation |
-| policy-runtime (expander) | 12 | Glob matching edge cases, expansion correctness |
-| policy-runtime (evaluator) | 25 | Every condition type, all logical combinators, default deny |
-| policy-runtime (wasm) | 19 | Full WASM ABI: alloc/dealloc, init, evaluate, error paths |
-| policy-compiler | 6 | validate happy/sad paths, edge cases |
-| policy-test (native) | 19 | All 18 spec cases + map build |
-| policy-test (wasm) | 19 | Same 18 spec cases through real WASM boundary |
-| **Total** | **111** | |
+| Crate                      | Tests   | What they cover                                             |
+| -------------------------- | ------- | ----------------------------------------------------------- |
+| policy-core                | 11      | Parsing every condition type, roundtrip serialisation       |
+| policy-runtime (expander)  | 12      | Glob matching edge cases, expansion correctness             |
+| policy-runtime (evaluator) | 25      | Every condition type, all logical combinators, default deny |
+| policy-runtime (wasm)      | 19      | Full WASM ABI: alloc/dealloc, init, evaluate, error paths   |
+| policy-compiler            | 6       | validate happy/sad paths, edge cases                        |
+| policy-test (native)       | 19      | All 18 spec cases + map build                               |
+| policy-test (wasm)         | 19      | Same 18 spec cases through real WASM boundary               |
+| **Total**                  | **111** |                                                             |

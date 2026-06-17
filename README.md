@@ -575,3 +575,12 @@ Any tool whose name matches `crm_tool_*` is unconditionally available to admins.
 | policy-test (native)       | 19      | All 18 spec cases + map build                               |
 | policy-test (wasm)         | 19      | Same 18 spec cases through real WASM boundary               |
 | **Total**                  | **111** |                                                             |
+
+---
+
+## Related repos
+
+| Repo | Description |
+|---|---|
+| [teknokeras/perso-demo](https://github.com/teknokeras/perso-demo) | Interactive CRM demo showing perso enforcing access control on live LLM tool calls |
+| [teknokeras/perso-sdk-node](https://github.com/teknokeras/perso-sdk-node) | Official Node.js SDK (`@teknokeras/perso-sdk`) — wraps the WASM ABI with audit logging |

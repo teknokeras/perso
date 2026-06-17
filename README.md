@@ -12,9 +12,31 @@ The LLM never touches auth. The host owns the role. perso makes the Allow/Deny c
 
 **[perso-demo](https://github.com/teknokeras/perso-demo)** is an interactive web app that shows perso in action.
 
-An LLM (Groq) chats with the user and calls file tools. perso intercepts every tool call intent before execution and returns Allow or Deny based on the caller's role. The UI shows the decision inline — green for allow, red for deny — alongside the reason from the policy engine.
+An LLM (Groq) chats with the user and calls tools against a mock B2B SaaS CRM. perso intercepts every tool call intent before execution and returns Allow or Deny based on the caller's role and runtime attributes. The UI shows the decision inline — green for allow, red for deny — alongside the reason from the policy engine.
 
-Try three roles (viewer, supervisor, admin) and watch which tool calls get through and which get blocked — without touching a single line of auth code in the tool implementations.
+Try three roles (agent, manager, admin) across seven CRM tools and watch which calls get through and which get blocked — without touching a single line of auth code in the tool implementations.
+
+**Roles and what they demonstrate:**
+
+| Role      | Description                                                                              |
+|-----------|------------------------------------------------------------------------------------------|
+| `agent`   | Front-line support. Can view and update customers, process refunds up to $500.           |
+| `manager` | Team lead. Can delete own records, access PII (with MFA), export data (production only), refunds up to $2,000. |
+| `admin`   | Full access. All operations including bulk updates (requires MFA + production env).      |
+
+**Tools and permissions:**
+
+| Tool              | agent | manager | admin | Condition                                                      |
+|-------------------|-------|---------|-------|----------------------------------------------------------------|
+| `view_customer`   | ✅    | ✅      | ✅    | —                                                              |
+| `update_customer` | ✅    | ✅      | ✅    | —                                                              |
+| `delete_customer` | ❌    | ✅      | ✅    | manager: `user_id == owner_id` only                            |
+| `process_refund`  | ✅    | ✅      | ✅    | agent: `amount ≤ $500` · manager/admin: `amount ≤ $2,000`      |
+| `access_pii`      | ❌    | ✅      | ✅    | `mfa_verified` must be present                                 |
+| `export_data`     | ❌    | ✅      | ✅    | `env == production` only                                       |
+| `bulk_update`     | ❌    | ❌      | ✅    | `env == production` + `mfa_verified`                           |
+
+Default action: **Deny**. Anything not explicitly allowed is rejected.
 
 → **[github.com/teknokeras/perso-demo](https://github.com/teknokeras/perso-demo)**
 
@@ -24,7 +46,7 @@ Try three roles (viewer, supervisor, admin) and watch which tool calls get throu
 
 When an LLM calls a tool through MCP, something has to decide whether that call is allowed. Without a policy layer, the choices are bad: either every tool is wide open, or you scatter auth logic across individual tool implementations, or you bolt on coarse-grained role checks with no ability to inspect arguments.
 
-perso gives you a third option: a structured, testable, swappable policy file that expresses fine-grained rules — "supervisors can issue refunds, but only up to $500", "admins can edit documents they own or any document", "this tool is blocked unless MFA is verified" — compiled into a WASM binary that the host calls before forwarding anything to MCP.
+perso gives you a third option: a structured, testable, swappable policy file that expresses fine-grained rules — "agents can process refunds, but only up to $500", "managers can delete customer records they own", "this tool is blocked unless MFA is verified" — compiled into a WASM binary that the host calls before forwarding anything to MCP.
 
 ---
 
@@ -88,14 +110,14 @@ No evaluation logic lives here. It is pure types and parsing.
 
 The evaluation engine, compiled to `cdylib` for WASM. Three modules:
 
-**`expander`** — runs at init time. Iterates every rule, expands glob patterns (e.g. `glob_tool_*`) against the `tools[]` array in the policy, and builds a flat `HashMap<(tool_name, role), Option<Condition>>`. After init there are zero wildcards in memory. Every lookup at evaluate time is O(1).
+**`expander`** — runs at init time. Iterates every rule, expands glob patterns (e.g. `crm_tool_*`) against the `tools[]` array in the policy, and builds a flat `HashMap<(tool_name, role), Option<Condition>>`. After init there are zero wildcards in memory. Every lookup at evaluate time is O(1).
 
 **`evaluator`** — runs on every tool call. Takes the pre-built map plus the three JSON input bags (arguments, agent attributes, resource attributes) and recurses through the condition tree. Returns an `EvaluationResponse` with a decision and a human-readable reason.
 
 **`wasm`** — the WASM ABI layer. Exports four functions to the host:
 
 | Export     | Signature                    | Purpose                                                         |
-| ---------- | ---------------------------- | --------------------------------------------------------------- |
+|------------|------------------------------|-----------------------------------------------------------------|
 | `alloc`    | `(len: i32) → i32`           | Host calls this to allocate memory before writing input strings |
 | `dealloc`  | `(ptr: i32, len: i32)`       | Host calls this to free buffers after reading responses         |
 | `init`     | `(ptr: i32, len: i32) → i32` | Load and materialise a policy JSON string                       |
@@ -129,16 +151,18 @@ The integration test suite, split into two layers:
 {
   "version": "perso-1.0.0",
   "default_action": "Deny",
-  "tools": ["read_file", "write_file", "glob_tool_alpha", "glob_tool_beta"],
+  "tools": ["view_customer", "update_customer", "delete_customer", "process_refund", "access_pii", "export_data", "bulk_update"],
   "rules": [
-    { "tool_name": "read_file", "roles": ["viewer"], "condition": null },
-    { "tool_name": "glob_tool_*", "roles": ["admin"], "condition": null }
+    { "tool_name": "view_customer", "roles": ["agent", "manager", "admin"], "condition": null },
+    { "tool_name": "process_refund", "roles": ["agent"], "condition": {
+        "NumericCheck": { "source": "Arguments", "field": "amount", "op": "Lte", "value": 500.0 }
+    }}
   ]
 }
 ```
 
 | Field            | Required | Description                                                    |
-| ---------------- | -------- | -------------------------------------------------------------- |
+|------------------|----------|----------------------------------------------------------------|
 | `version`        | yes      | Schema version string, e.g. `"perso-1.0.0"`                   |
 | `default_action` | yes      | `"Allow"` or `"Deny"` — applied when no rule matches          |
 | `tools`          | yes      | All known tool names. The expansion universe for glob patterns |
@@ -147,7 +171,7 @@ The integration test suite, split into two layers:
 Each rule:
 
 | Field       | Required | Description                                            |
-| ----------- | -------- | ------------------------------------------------------ |
+|-------------|----------|--------------------------------------------------------|
 | `tool_name` | yes      | Concrete name or glob pattern (`*` wildcard only)      |
 | `roles`     | yes      | List of role strings that this rule grants access to   |
 | `condition` | yes      | `null` for unconditional access, or a condition object |
@@ -165,7 +189,7 @@ Operators: `Lte`, `Gte`, `Eq`, `Lt`, `Gt`
 **`StringCheck`** — check whether a string field is in or not in a list.
 
 ```json
-{ "StringCheck": { "source": "Arguments", "field": "path", "op": "NotIn", "value": ["/etc/passwd"] } }
+{ "StringCheck": { "source": "AgentAttributes", "field": "env", "op": "In", "value": ["production"] } }
 ```
 
 Operators: `In`, `NotIn`
@@ -173,7 +197,7 @@ Operators: `In`, `NotIn`
 **`FieldPresent`** — assert a field exists and is not null.
 
 ```json
-{ "FieldPresent": { "source": "AgentAttributes", "field": "session_token" } }
+{ "FieldPresent": { "source": "AgentAttributes", "field": "mfa_verified" } }
 ```
 
 **`FieldEquals`** — assert a field in one source equals a field in another.
@@ -197,13 +221,13 @@ Operators: `In`, `NotIn`
 Tool names in rules may contain `*` as a wildcard. The `tools[]` array is the expansion universe — a glob is matched against every name in that list at `init` time. No wildcards survive past initialisation.
 
 ```json
-"tools": ["glob_tool_alpha", "glob_tool_beta", "other_tool"],
+"tools": ["crm_tool_alpha", "crm_tool_beta", "other_tool"],
 "rules": [
-  { "tool_name": "glob_tool_*", "roles": ["admin"], "condition": null }
+  { "tool_name": "crm_tool_*", "roles": ["admin"], "condition": null }
 ]
 ```
 
-This expands into two map entries: `(glob_tool_alpha, admin)` and `(glob_tool_beta, admin)`. `other_tool` is unaffected.
+This expands into two map entries: `(crm_tool_alpha, admin)` and `(crm_tool_beta, admin)`. `other_tool` is unaffected.
 
 ---
 
@@ -236,7 +260,7 @@ Output:
 
 ```
 perso: validating policies/example.json
-  glob 'glob_tool_*' → 2 tool(s) × 1 role(s) = 2 map entries
+  glob 'crm_tool_*' → 2 tool(s) × 1 role(s) = 2 map entries
 ok: 10 rule(s), 13 tool(s), 13 map entries, 0 warning(s)
 ```
 
@@ -301,7 +325,7 @@ No extra packages needed — Node.js has built-in `WebAssembly` support.
 
 The WASM binary contains **no policy**. You load `policy_runtime.wasm` (the engine) and `example.json` (the policy) separately, then pass the policy JSON to `init()` at startup.
 
-```js
+```javascript
 const fs = require('fs');
 
 // ── 1. Load the engine and the policy ────────────────────────────────────────
@@ -313,7 +337,6 @@ const { alloc, dealloc, init, evaluate, memory } = instance.exports;
 
 // ── 2. ABI helpers ────────────────────────────────────────────────────────────
 
-// Write a JS string into WASM linear memory; return [ptr, len].
 function writeString(str) {
   const bytes = new TextEncoder().encode(str);
   const ptr   = alloc(bytes.length);
@@ -321,8 +344,6 @@ function writeString(str) {
   return [ptr, bytes.length];
 }
 
-// Read a length-prefixed response buffer, free it, return parsed JSON object.
-// Buffer layout: [u32 LE length][...UTF-8 body...]
 function readResponse(ptr) {
   const view   = new DataView(memory.buffer);
   const len    = view.getUint32(ptr, /*littleEndian=*/true);
@@ -339,7 +360,6 @@ console.log(initResp);
 // { ok: true }
 
 // ── 4. Evaluate a tool call ───────────────────────────────────────────────────
-// Call this on every LLM tool call before forwarding to MCP.
 function checkToolCall(toolName, args, role, agentAttrs = {}, resourceAttrs = {}) {
   const [tPtr, tLen] = writeString(toolName);
   const [aPtr, aLen] = writeString(JSON.stringify(args));
@@ -351,21 +371,23 @@ function checkToolCall(toolName, args, role, agentAttrs = {}, resourceAttrs = {}
   return readResponse(evaluate(tPtr, tLen, aPtr, aLen, cPtr, cLen));
 }
 
-// Examples:
-console.log(checkToolCall('read_file', {}, 'viewer'));
-// { decision: 'Allow', reason: "rule matched tool 'read_file' for role 'viewer'; no condition required" }
+// Examples from the CRM demo scenario:
+console.log(checkToolCall('view_customer', { id: 'C-1042' }, 'agent'));
+// { decision: 'Allow', reason: "rule matched tool 'view_customer' for role 'agent'; no condition required" }
 
-console.log(checkToolCall('refund_user', { amount: 200 }, 'supervisor', { session_token: 'tok-abc' }));
+console.log(checkToolCall('process_refund', { amount: 200 }, 'agent'));
 // { decision: 'Allow', reason: "...condition passed" }
 
-console.log(checkToolCall('refund_user', { amount: 600 }, 'supervisor', { session_token: 'tok-abc' }));
-// { decision: 'Deny', reason: "...condition failed" }
+console.log(checkToolCall('process_refund', { amount: 800 }, 'agent'));
+// { decision: 'Deny', reason: "NumericCheck failed: amount 800 exceeds 500" }
 
-console.log(checkToolCall('dangerous_delete', {}, 'viewer'));
-// { decision: 'Deny', reason: "no rule matched...applying default_action" }
+console.log(checkToolCall('delete_customer', { id: 'C-9001' }, 'manager', { user_id: 'mgr-001' }, { owner_id: 'mgr-002' }));
+// { decision: 'Deny', reason: "FieldEquals failed: user_id != owner_id" }
+
+console.log(checkToolCall('bulk_update', {}, 'admin', { env: 'production', mfa_verified: true }));
+// { decision: 'Allow', reason: "...all conditions passed" }
 
 // ── 5. Hot-reload the policy ──────────────────────────────────────────────────
-// Call init() again at any time with new JSON — no restart needed.
 const newPolicyJson = fs.readFileSync('policies/updated.json', 'utf8');
 const [rPtr, rLen]  = writeString(newPolicyJson);
 console.log(readResponse(init(rPtr, rLen)));
@@ -381,8 +403,6 @@ Install the official Bytecode Alliance wasmtime binding:
 ```
 pip install wasmtime
 ```
-
-Again: the WASM binary has no policy baked in. Load both files separately and pass the policy JSON string to `init()`.
 
 ```python
 from wasmtime import Engine, Linker, Module, Store
@@ -407,28 +427,24 @@ memory  = instance.exports(store)['memory']
 # ── 2. ABI helpers ────────────────────────────────────────────────────────────
 
 def write_string(s: str):
-    """Write a string into WASM linear memory; return (ptr, len)."""
     data = s.encode('utf-8')
     ptr  = alloc(store, len(data))
     memory.write(store, data, ptr)
     return ptr, len(data)
 
 def read_response(ptr: int) -> dict:
-    """Read a length-prefixed response buffer, free it, return parsed dict."""
     header = bytes(memory.read(store, ptr, ptr + 4))
-    length = struct.unpack_from('<I', header)[0]      # u32 little-endian
+    length = struct.unpack_from('<I', header)[0]
     body   = bytes(memory.read(store, ptr + 4, ptr + 4 + length))
     dealloc(store, ptr, 4 + length)
     return json.loads(body)
 
 # ── 3. Initialise the engine with the policy (once at startup) ───────────────
 ptr, length = write_string(policy_json)
-resp = read_response(init_fn(store, ptr, length))
-print(resp)
+print(read_response(init_fn(store, ptr, length)))
 # {'ok': True}
 
 # ── 4. Evaluate a tool call ───────────────────────────────────────────────────
-# Call this on every LLM tool call before forwarding to MCP.
 def check_tool_call(tool_name: str, args: dict, role: str,
                     agent_attrs: dict = {}, resource_attrs: dict = {}) -> dict:
     tp, tl = write_string(tool_name)
@@ -440,21 +456,23 @@ def check_tool_call(tool_name: str, args: dict, role: str,
     }))
     return read_response(eval_fn(store, tp, tl, ap, al, cp, cl))
 
-# Examples:
-print(check_tool_call('read_file', {}, 'viewer'))
-# {'decision': 'Allow', 'reason': "rule matched tool 'read_file' for role 'viewer'; no condition required"}
+# Examples from the CRM demo scenario:
+print(check_tool_call('view_customer', {'id': 'C-1042'}, 'agent'))
+# {'decision': 'Allow', 'reason': "rule matched tool 'view_customer' for role 'agent'; no condition required"}
 
-print(check_tool_call('refund_user', {'amount': 200}, 'supervisor', {'session_token': 'tok-abc'}))
+print(check_tool_call('process_refund', {'amount': 200}, 'agent'))
 # {'decision': 'Allow', 'reason': "...condition passed"}
 
-print(check_tool_call('refund_user', {'amount': 600}, 'supervisor', {'session_token': 'tok-abc'}))
-# {'decision': 'Deny', 'reason': "...condition failed"}
+print(check_tool_call('process_refund', {'amount': 800}, 'agent'))
+# {'decision': 'Deny', 'reason': "NumericCheck failed: amount 800 exceeds 500"}
 
-print(check_tool_call('dangerous_delete', {}, 'viewer'))
-# {'decision': 'Deny', 'reason': "no rule matched...applying default_action"}
+print(check_tool_call('access_pii', {}, 'manager', {}))
+# {'decision': 'Deny', 'reason': "FieldPresent failed: mfa_verified not in agent_attrs"}
+
+print(check_tool_call('bulk_update', {}, 'admin', {'env': 'production', 'mfa_verified': True}))
+# {'decision': 'Allow', 'reason': "...all conditions passed"}
 
 # ── 5. Hot-reload the policy ──────────────────────────────────────────────────
-# Call init_fn() again at any time with new JSON — no restart needed.
 with open('policies/updated.json', 'r') as f:
     new_policy_json = f.read()
 
@@ -481,8 +499,8 @@ Response shapes:
 ```json
 { "ok": true }
 { "error": "policy parse error: ..." }
-{ "decision": "Allow", "reason": "rule matched tool 'read_file' for role 'viewer'; no condition required" }
-{ "decision": "Deny",  "reason": "no rule matched tool 'write_file' for role 'viewer'; applying default_action" }
+{ "decision": "Allow", "reason": "rule matched tool 'view_customer' for role 'agent'; no condition required" }
+{ "decision": "Deny",  "reason": "no rule matched tool 'delete_customer' for role 'agent'; applying default_action" }
 ```
 
 ---
@@ -506,45 +524,49 @@ Call `init` again with new policy JSON at any time. The `Mutex<PolicyState>` ins
 ## Example policy walkthrough
 
 ```json
-{ "tool_name": "refund_user", "roles": ["supervisor"],
+{ "tool_name": "process_refund", "roles": ["agent"],
   "condition": { "NumericCheck": { "source": "Arguments", "field": "amount", "op": "Lte", "value": 500.0 } } }
 ```
 
-Supervisors can issue refunds, but only up to $500. A refund of $600 is denied even for a supervisor.
+Agents can process refunds, but only up to $500. A refund of $800 is denied even for an agent.
 
 ```json
-{ "tool_name": "edit_document", "roles": ["admin"],
-  "condition": { "Any": [
-    { "FieldEquals": { "source_a": "AgentAttributes", "field_a": "user_id",
-                       "source_b": "ResourceAttributes", "field_b": "owner_id" } },
-    { "StringCheck": { "source": "AgentAttributes", "field": "role", "op": "In", "value": ["admin"] } }
-  ]}}
+{ "tool_name": "delete_customer", "roles": ["manager"],
+  "condition": { "FieldEquals": { "source_a": "AgentAttributes", "field_a": "user_id",
+                                   "source_b": "ResourceAttributes", "field_b": "owner_id" } } }
 ```
 
-Admins can edit a document if they are the owner, or unconditionally if their session role is admin. Either branch passing is enough.
+Managers can delete customer records, but only records they own. Attempting to delete a record owned by another manager is denied via `FieldEquals`.
 
 ```json
-{ "tool_name": "guarded_tool", "roles": ["supervisor"],
+{ "tool_name": "access_pii", "roles": ["manager", "admin"],
+  "condition": { "FieldPresent": { "source": "AgentAttributes", "field": "mfa_verified" } } }
+```
+
+Managers and admins can access PII, but only when `mfa_verified` is present in their session attributes.
+
+```json
+{ "tool_name": "bulk_update", "roles": ["admin"],
   "condition": { "All": [
     { "StringCheck": { "source": "AgentAttributes", "field": "env", "op": "In", "value": ["production"] } },
     { "FieldPresent": { "source": "AgentAttributes", "field": "mfa_verified" } }
   ]}}
 ```
 
-Supervisors can use this tool only when the environment is production AND MFA has been verified. Both must pass.
+Admins can run bulk updates only when the environment is production AND MFA has been verified. Both must pass.
 
 ```json
-{ "tool_name": "glob_tool_*", "roles": ["admin"], "condition": null }
+{ "tool_name": "crm_tool_*", "roles": ["admin"], "condition": null }
 ```
 
-Any tool whose name starts with `glob_tool_` is unconditionally available to admins. The glob is expanded at init time against the `tools[]` array — no wildcard pattern matching at evaluate time.
+Any tool whose name matches `crm_tool_*` is unconditionally available to admins. The glob is expanded at init time against the `tools[]` array — no wildcard pattern matching at evaluate time.
 
 ---
 
 ## Test coverage summary
 
 | Crate                      | Tests   | What they cover                                             |
-| -------------------------- | ------- | ----------------------------------------------------------- |
+|----------------------------|---------|-------------------------------------------------------------|
 | policy-core                | 11      | Parsing every condition type, roundtrip serialisation       |
 | policy-runtime (expander)  | 12      | Glob matching edge cases, expansion correctness             |
 | policy-runtime (evaluator) | 25      | Every condition type, all logical combinators, default deny |

@@ -50,6 +50,38 @@ perso gives you a third option: a structured, testable, swappable policy file th
 
 ---
 
+## Threat model
+
+perso is one layer in an agentic system's defense, not a complete security solution. This section maps perso's actual coverage against the [OWASP Top 10 for Agentic Applications (2026)](https://genai.owasp.org/), so it's clear exactly what's handled, what's partially mitigated, and what's explicitly out of scope.
+
+### Directly mitigated
+
+**ASI02 — Tool Misuse & Exploitation.** This is perso's core job. Every tool call intent is evaluated against an explicit allow-list of (tool, role, condition) before it reaches the real implementation. An agent role calling `process_refund` with `amount: 50000` is denied by the `NumericCheck` condition regardless of what the LLM was convinced to do — the tool's blast radius is bounded by policy, not by how well the model resists manipulation.
+
+**ASI03 — Agent Identity & Privilege Abuse.** perso's per-role expansion model means a given identity's permissions are explicit and inspectable — no implicit inheritance, no "admin-by-default" tool. `FieldEquals` conditions (e.g. `user_id == owner_id`) enforce ownership boundaries so even a valid role can't act outside its own scope. Compromise of one role's context doesn't expand the privilege of the call beyond what that role's rules allow.
+
+### Partially mitigated
+
+**ASI01 — Agent Goal Hijack.** perso doesn't prevent an LLM from being manipulated into *wanting* to do something harmful — that's a model-behavior problem, not an authorization problem. But it is the last line of defense when a hijacked agent tries to act on that intent: a hijacked agent role still can't call `bulk_update` without `env == production` and `mfa_verified`, no matter what the prompt convinced it to attempt.
+
+**ASI08 — Cascading Agent Failures.** Default-deny limits the blast radius of any single bad decision, since unspecified calls fail closed rather than open. Full mitigation of cascading failures across multi-step agent chains needs the audit/replay layer (in progress — see Roadmap) to reconstruct *why* a sequence of calls went wrong.
+
+**ASI09 — Human-Agent Trust Exploitation.** Every decision includes a structured `reason` string, giving a human reviewer something concrete to check rather than trusting the agent's own account of what it did. This is a partial mitigation — it supports human review, it doesn't automate it.
+
+### Explicitly out of scope
+
+These are real risks in agentic systems that perso does not address, by design — they belong to other layers of the stack:
+
+- **ASI04 — Agentic Supply Chain Compromise** (compromised dependencies, tool definitions, or model weights)
+- **ASI05 — Unexpected Code Execution** (sandboxing the LLM's own generated code; perso sandboxes itself via WASM, not the agent's outputs)
+- **ASI06 — Memory & Context Poisoning** (corrupted RAG/context stores feeding the model bad information)
+- **ASI07 — Insecure Inter-Agent Communication** (multi-agent protocols and trust between agents)
+- **ASI10 — Rogue Agents** (detecting an agent that has gone fully off-policy at the behavioral level)
+
+If you're building a production agentic system, perso should be one control among several — pair it with input validation, model-level guardrails, and monitoring for the categories above.
+
+---
+
 ## Architecture
 
 ```
@@ -162,7 +194,7 @@ The integration test suite, split into two layers:
 ```
 
 | Field            | Required | Description                                                    |
-|------------------|----------|----------------------------------------------------------------|
+|------------------|----------|------------------------------------------------------------------|
 | `version`        | yes      | Schema version string, e.g. `"perso-1.0.0"`                   |
 | `default_action` | yes      | `"Allow"` or `"Deny"` — applied when no rule matches          |
 | `tools`          | yes      | All known tool names. The expansion universe for glob patterns |
@@ -519,6 +551,8 @@ Call `init` again with new policy JSON at any time. The `Mutex<PolicyState>` ins
 - The WASM sandbox means perso has no filesystem, network, or syscall access. It only reads and writes linear memory.
 - For zero-trust deployments, embed perso in both the backend (knows the user role) and the MCP server (knows the service identity). Each layer enforces independently.
 
+See [Threat model](#threat-model) above for how this maps to the OWASP Agentic Applications risk categories.
+
 ---
 
 ## Example policy walkthrough
@@ -566,15 +600,15 @@ Any tool whose name matches `crm_tool_*` is unconditionally available to admins.
 ## Test coverage summary
 
 | Crate                      | Tests   | What they cover                                             |
-|----------------------------|---------|-------------------------------------------------------------|
+|----------------------------|---------|---------------------------------------------------------------|
 | policy-core                | 11      | Parsing every condition type, roundtrip serialisation       |
-| policy-runtime (expander)  | 12      | Glob matching edge cases, expansion correctness             |
-| policy-runtime (evaluator) | 25      | Every condition type, all logical combinators, default deny |
-| policy-runtime (wasm)      | 19      | Full WASM ABI: alloc/dealloc, init, evaluate, error paths   |
-| policy-compiler            | 6       | validate happy/sad paths, edge cases                        |
-| policy-test (native)       | 19      | All 18 spec cases + map build                               |
-| policy-test (wasm)         | 19      | Same 18 spec cases through real WASM boundary               |
-| **Total**                  | **111** |                                                             |
+| policy-runtime (expander)  | 12      | Glob matching edge cases, expansion correctness               |
+| policy-runtime (evaluator) | 25      | Every condition type, all logical combinators, default deny   |
+| policy-runtime (wasm)      | 19      | Full WASM ABI: alloc/dealloc, init, evaluate, error paths     |
+| policy-compiler            | 6       | validate happy/sad paths, edge cases                           |
+| policy-test (native)       | 19      | All 18 spec cases + map build                                  |
+| policy-test (wasm)         | 19      | Same 18 spec cases through real WASM boundary                  |
+| **Total**                  | **111** |                                                               |
 
 ---
 

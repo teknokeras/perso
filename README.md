@@ -1,10 +1,24 @@
 # perso
 
-**perso** is a policy enforcement engine for MCP (Model Context Protocol) tool calls, compiled to WebAssembly.
+**perso is an embedded ABAC policy engine for MCP tool-call authorization — compiled to WebAssembly, with no control plane, no SaaS account, and no network call in the decision path.**
 
-It lets you define who can call which tools, under what conditions, in a plain JSON file. That file is compiled into a single portable `.wasm` binary that can run inside any host — a backend server, an MCP server, an edge function, or a CLI — without modification.
+You define who can call which tools, under what conditions, in a plain JSON file. That file compiles into a single portable `.wasm` binary you load directly into your own process — a backend server, an MCP server, an edge function, or a CLI. There is nothing to deploy, register, or authenticate against. The policy engine ships inside your binary, next to your code, and answers Allow/Deny in-process, in microseconds.
 
-The LLM never touches auth. The host owns the role. perso makes the Allow/Deny call in microseconds, at the point where the tool call would be forwarded.
+The LLM never touches auth. The host owns the role. perso makes the call at the point where the tool call would be forwarded — without leaving the process.
+
+---
+
+## What perso is not
+
+This matters more than what perso *is*, because most authorization tools in this space are platforms, and perso deliberately isn't one.
+
+- **Not a SaaS platform.** No control plane, no hosted dashboard, no account to create. Cerbos Hub, Permit.io, and Axiomatics all require you to either run their service or talk to it. perso has no service to talk to.
+- **Not a network call per decision.** The policy is compiled into the WASM binary you load. There is no PDP to reach over HTTP, no latency budget consumed by a round trip. Tools that compile Rego to WASM (e.g. OPA's WASM target) get partway here; perso is built around this as the entire design, not an optional deployment mode.
+- **Not multi-tenant.** If you need centralized policy management across many services, many tenants, and a team that isn't comfortable with policy-as-code, you've outgrown perso — go use Permit.io or Cerbos Hub. That's a legitimate, different problem.
+- **Not a dashboard or audit platform.** perso returns a decision and a reason string. It does not store history, render charts, or forward to a SIEM by itself. Wire that up at the host level if you need it.
+- **Not trying to support every access-control model.** RBAC, ReBAC, and policy hot-reload at scale are explicitly someone else's job. perso does ABAC over tool calls, well, and stops there.
+
+If your honest requirement is "I want tool-call authorization with zero infrastructure, embedded in a process I already control, in a language I'm already using" — that's the gap perso fills. If your requirement is "I want a managed authorization platform my whole org standardizes on" — perso is the wrong tool, and that's fine.
 
 ---
 
@@ -12,9 +26,9 @@ The LLM never touches auth. The host owns the role. perso makes the Allow/Deny c
 
 **[perso-demo](https://github.com/teknokeras/perso-demo)** is an interactive web app that shows perso in action.
 
-An LLM (Groq) chats with the user and calls tools against a mock B2B SaaS CRM. perso intercepts every tool call intent before execution and returns Allow or Deny based on the caller's role and runtime attributes. The UI shows the decision inline — green for allow, red for deny — alongside the reason from the policy engine.
+An LLM (Groq) chats with the user and calls tools against a mock B2B SaaS CRM. perso intercepts every tool call intent before execution and returns Allow or Deny based on the caller's role and runtime attributes — all evaluated in-process, with no external service involved in the decision. The UI shows the decision inline — green for allow, red for deny — alongside the reason from the policy engine.
 
-Try three roles (agent, manager, admin) across seven CRM tools and watch which calls get through and which get blocked — without touching a single line of auth code in the tool implementations.
+Try three roles (agent, manager, admin) across seven CRM tools and watch which calls get through and which get blocked — without touching a single line of auth code in the tool implementations, and without standing up anything beyond the demo app itself.
 
 **Roles and what they demonstrate:**
 
@@ -46,7 +60,9 @@ Default action: **Deny**. Anything not explicitly allowed is rejected.
 
 When an LLM calls a tool through MCP, something has to decide whether that call is allowed. Without a policy layer, the choices are bad: either every tool is wide open, or you scatter auth logic across individual tool implementations, or you bolt on coarse-grained role checks with no ability to inspect arguments.
 
-perso gives you a third option: a structured, testable, swappable policy file that expresses fine-grained rules — "agents can process refunds, but only up to $500", "managers can delete customer records they own", "this tool is blocked unless MFA is verified" — compiled into a WASM binary that the host calls before forwarding anything to MCP.
+The broader authorization-for-agents space already has answers to "fine-grained ABAC for tool calls" — Cerbos, Permit.io, Cedar-based gateways, and OPA-to-WASM all address this. What's less settled is the deployment shape: most of these are platforms with a control plane, a hosted decision service, or both. perso answers the same authorization question with a different shape: a structured, testable, swappable policy file compiled into a WASM binary that the host calls directly, in-process, with nothing else to run.
+
+"agents can process refunds, but only up to $500", "managers can delete customer records they own", "this tool is blocked unless MFA is verified" — these rules look the same regardless of which engine evaluates them. The differentiator is what you have to stand up to get the answer: with perso, it's nothing beyond the binary you already ship.
 
 ---
 
@@ -56,7 +72,7 @@ perso is one layer in an agentic system's defense, not a complete security solut
 
 ### Directly mitigated
 
-**ASI02 — Tool Misuse & Exploitation.** This is perso's core job. Every tool call intent is evaluated against an explicit allow-list of (tool, role, condition) before it reaches the real implementation. An agent role calling `process_refund` with `amount: 50000` is denied by the `NumericCheck` condition regardless of what the LLM was convinced to do — the tool's blast radius is bounded by policy, not by how well the model resists manipulation.
+**ASI02 — Tool Misuse & Exploitation.** This is perso's core job. Every tool call intent is evaluated against an explicit allow-list of (tool, role, condition) before it reaches the real implementation — evaluated in-process, with no dependency on a reachable external service. An agent role calling `process_refund` with `amount: 50000` is denied by the `NumericCheck` condition regardless of what the LLM was convinced to do — the tool's blast radius is bounded by policy, not by how well the model resists manipulation, and not by whether a network call to a PDP succeeded.
 
 **ASI03 — Agent Identity & Privilege Abuse.** perso's per-role expansion model means a given identity's permissions are explicit and inspectable — no implicit inheritance, no "admin-by-default" tool. `FieldEquals` conditions (e.g. `user_id == owner_id`) enforce ownership boundaries so even a valid role can't act outside its own scope. Compromise of one role's context doesn't expand the privilege of the call beyond what that role's rules allow.
 
@@ -91,6 +107,7 @@ Browser / Client
    Backend  ◄─── owns session, extracts role from JWT/cookie
       │
       │  calls evaluate(tool, args, context) on every tool call
+      │  (in-process — no network hop to a policy service)
       ▼
   perso WASM  ──► Allow → forward to MCP
                   Deny  → reject, return error to LLM
@@ -102,7 +119,7 @@ Browser / Client
   Core System
 ```
 
-The LLM returns a tool call intent. The backend intercepts it, builds a context object (role, agent attributes, resource attributes), and asks perso. perso answers in one O(1) map lookup plus optional condition evaluation. The answer is always `{ "decision": "Allow", "reason": "..." }` or `{ "decision": "Deny", "reason": "..." }`.
+The LLM returns a tool call intent. The backend intercepts it, builds a context object (role, agent attributes, resource attributes), and asks perso. perso answers in one O(1) map lookup plus optional condition evaluation — entirely within the host process's memory space. The answer is always `{ "decision": "Allow", "reason": "..." }` or `{ "decision": "Deny", "reason": "..." }`.
 
 ---
 
@@ -319,6 +336,8 @@ PERSO_WASM=dist/policy_runtime.wasm cargo test -p policy-test
 ```
 cargo test
 ```
+
+No service to start, no account to create, no environment variables for a hosted endpoint. Steps 1–4 are the entire setup.
 
 ---
 
@@ -539,7 +558,7 @@ Response shapes:
 
 ## Hot-reloading the policy
 
-Call `init` again with new policy JSON at any time. The `Mutex<PolicyState>` inside the WASM module is replaced atomically. No restart required. For multi-threaded hosts, wrap the `Store` in an `Arc<RwLock<>>` so concurrent `evaluate` calls read safely while the reload write is in progress.
+Call `init` again with new policy JSON at any time. The `Mutex<PolicyState>` inside the WASM module is replaced atomically. No restart required, and no coordination with an external service. For multi-threaded hosts, wrap the `Store` in an `Arc<RwLock<>>` so concurrent `evaluate` calls read safely while the reload write is in progress.
 
 ---
 
@@ -548,8 +567,8 @@ Call `init` again with new policy JSON at any time. The `Mutex<PolicyState>` ins
 - The LLM never sees or touches the role token. The host extracts the role from its own JWT/session at connection time.
 - `default_action: "Deny"` means anything not explicitly allowed is rejected. This is the safe default and the one used in the example policy.
 - Conditions are evaluated against three separate JSON bags — arguments, agent attributes, and resource attributes — so the LLM-supplied arguments can never impersonate session data.
-- The WASM sandbox means perso has no filesystem, network, or syscall access. It only reads and writes linear memory.
-- For zero-trust deployments, embed perso in both the backend (knows the user role) and the MCP server (knows the service identity). Each layer enforces independently.
+- The WASM sandbox means perso has no filesystem, network, or syscall access. It only reads and writes linear memory. This also means a misbehaving policy can't reach out to anything, even by accident.
+- For zero-trust deployments, embed perso in both the backend (knows the user role) and the MCP server (knows the service identity). Each layer enforces independently, with no shared external dependency to fail.
 
 See [Threat model](#threat-model) above for how this maps to the OWASP Agentic Applications risk categories.
 
@@ -612,9 +631,17 @@ Any tool whose name matches `crm_tool_*` is unconditionally available to admins.
 
 ---
 
+## Roadmap
+
+- **Latency benchmark** — a published, reproducible comparison of in-process WASM evaluation against a network-call PDP pattern (e.g. a local HTTP round trip to a hosted-style policy service). This is the proof for the "no network call" claim above, and it doesn't exist yet — it's the next thing to build, not an assumed result.
+- Audit/replay layer for reconstructing multi-step decision chains (referenced under ASI08 above).
+- `perso-sdk-python` — official Python SDK, same shape as `perso-sdk-node`.
+
+---
+
 ## Related repos
 
 | Repo | Description |
 |---|---|
-| [teknokeras/perso-demo](https://github.com/teknokeras/perso-demo) | Interactive CRM demo showing perso enforcing access control on live LLM tool calls |
+| [teknokeras/perso-demo](https://github.com/teknokeras/perso-demo) | Interactive CRM demo showing perso enforcing access control on live LLM tool calls, with zero infrastructure beyond the demo app |
 | [teknokeras/perso-sdk-node](https://github.com/teknokeras/perso-sdk-node) | Official Node.js SDK (`@teknokeras/perso-sdk`) — wraps the WASM ABI with audit logging |

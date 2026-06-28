@@ -6,6 +6,8 @@ You define who can call which tools, under what conditions, in a plain JSON file
 
 The LLM never touches auth. The host owns the role. perso makes the call at the point where the tool call would be forwarded — without leaving the process.
 
+This isn't just asserted. [perso-benchmark](https://github.com/teknokeras/perso-benchmark) measures it directly: in-process WASM evaluation runs at **~1.75µs median**, versus **~50.3µs** for the same decision over a localhost network call to a PDP-style server — roughly **29× faster at the median, ~53× at p99**. That's the best case for the network path (no TLS, no geographic distance, no multi-tenant queueing) — see the benchmark repo for full methodology, hardware specs, and raw results.
+
 ---
 
 ## What perso is not
@@ -13,7 +15,7 @@ The LLM never touches auth. The host owns the role. perso makes the call at the 
 This matters more than what perso *is*, because most authorization tools in this space are platforms, and perso deliberately isn't one.
 
 - **Not a SaaS platform.** No control plane, no hosted dashboard, no account to create. Cerbos Hub, Permit.io, and Axiomatics all require you to either run their service or talk to it. perso has no service to talk to.
-- **Not a network call per decision.** The policy is compiled into the WASM binary you load. There is no PDP to reach over HTTP, no latency budget consumed by a round trip. Tools that compile Rego to WASM (e.g. OPA's WASM target) get partway here; perso is built around this as the entire design, not an optional deployment mode.
+- **Not a network call per decision.** The policy is compiled into the WASM binary you load. There is no PDP to reach over HTTP, no latency budget consumed by a round trip. Tools that compile Rego to WASM (e.g. OPA's WASM target) get partway here; perso is built around this as the entire design, not an optional deployment mode. [Measured, not just claimed](https://github.com/teknokeras/perso-benchmark).
 - **Not multi-tenant.** If you need centralized policy management across many services, many tenants, and a team that isn't comfortable with policy-as-code, you've outgrown perso — go use Permit.io or Cerbos Hub. That's a legitimate, different problem.
 - **Not a dashboard or audit platform.** perso returns a decision and a reason string. It does not store history, render charts, or forward to a SIEM by itself. Wire that up at the host level if you need it.
 - **Not trying to support every access-control model.** RBAC, ReBAC, and policy hot-reload at scale are explicitly someone else's job. perso does ABAC over tool calls, well, and stops there.
@@ -633,9 +635,9 @@ Any tool whose name matches `crm_tool_*` is unconditionally available to admins.
 
 ## Roadmap
 
-- **Latency benchmark** — a published, reproducible comparison of in-process WASM evaluation against a network-call PDP pattern (e.g. a local HTTP round trip to a hosted-style policy service). This is the proof for the "no network call" claim above, and it doesn't exist yet — it's the next thing to build, not an assumed result.
+- ~~**Latency benchmark**~~ — done. See [perso-benchmark](https://github.com/teknokeras/perso-benchmark) for the full methodology and results: in-process WASM evaluation is ~29× faster at the median than the same decision over a localhost network call, ~53× at p99.
 - Audit/replay layer for reconstructing multi-step decision chains (referenced under ASI08 above).
-- `perso-sdk-python` — official Python SDK, same shape as `perso-sdk-node`.
+- ~~`perso-sdk-python`~~ — done. See [perso-sdk-python](https://github.com/teknokeras/perso-sdk-python).
 
 ---
 
@@ -643,5 +645,7 @@ Any tool whose name matches `crm_tool_*` is unconditionally available to admins.
 
 | Repo | Description |
 |---|---|
-| [teknokeras/perso-demo](https://github.com/teknokeras/perso-demo) | Interactive CRM demo showing perso enforcing access control on live LLM tool calls, with zero infrastructure beyond the demo app |
+| [teknokeras/perso-demo](https://github.com/teknokeras/perso-demo) | Interactive CRM demo showing perso enforcing access control on live LLM tool calls, with zero infrastructure beyond the demo app. Two interchangeable backends (Node and Python) share one frontend. |
 | [teknokeras/perso-sdk-node](https://github.com/teknokeras/perso-sdk-node) | Official Node.js SDK (`@teknokeras/perso-sdk`) — wraps the WASM ABI with audit logging |
+| [teknokeras/perso-sdk-python](https://github.com/teknokeras/perso-sdk-python) | Official Python SDK (`perso-sdk`) — same shape as the Node SDK, synchronous API |
+| [teknokeras/perso-benchmark](https://github.com/teknokeras/perso-benchmark) | Reproducible latency benchmark: in-process WASM vs. localhost network-call PDP, with full methodology and raw results |

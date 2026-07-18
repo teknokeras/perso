@@ -6,7 +6,11 @@ You define who can call which tools, under what conditions, in a plain JSON file
 
 The LLM never touches auth. The host owns the role. perso makes the call at the point where the tool call would be forwarded — without leaving the process.
 
+perso is **stateless and per-call by design**: each decision evaluates one tool call against the attributes you pass in. For agentic loops — where the real risk often lives in a *sequence* of individually-innocent calls — the host or gateway accumulates session context and feeds it in as attributes; perso evaluates whatever context you give it, at microsecond cost per call. See [Security model](#security-model) for where this boundary sits and why.
+
 This isn't just asserted. [perso-benchmark](https://github.com/teknokeras/perso-benchmark) measures it directly: in-process WASM evaluation runs at **~1.75µs median**, versus **~50.3µs** for the same decision over a localhost network call to a PDP-style server — roughly **29× faster at the median, ~53× at p99**. That's the best case for the network path (no TLS, no geographic distance, no multi-tenant queueing) — see the benchmark repo for full methodology, hardware specs, and raw results.
+
+**License: MIT.**
 
 ---
 
@@ -14,13 +18,18 @@ This isn't just asserted. [perso-benchmark](https://github.com/teknokeras/perso-
 
 This matters more than what perso *is*, because most authorization tools in this space are platforms, and perso deliberately isn't one.
 
-- **Not a SaaS platform.** No control plane, no hosted dashboard, no account to create. Cerbos Hub, Permit.io, and Axiomatics all require you to either run their service or talk to it. perso has no service to talk to.
+- **Not a SaaS platform.** No control plane, no hosted dashboard, no account to create. Credit where due: Cerbos also ships an embedded WASM PDP that evaluates in-process — but it's exclusive to their commercial Cerbos Hub, which compiles the policy bundles and distributes them from its control plane. Permit.io and Axiomatics likewise require you to run or talk to their service. perso has no account, no bundle CDN, and no control plane at all — the policy file lives in your repo and compiles on your machine.
 - **Not a network call per decision.** The policy is compiled into the WASM binary you load. There is no PDP to reach over HTTP, no latency budget consumed by a round trip. Tools that compile Rego to WASM (e.g. OPA's WASM target) get partway here; perso is built around this as the entire design, not an optional deployment mode. [Measured, not just claimed](https://github.com/teknokeras/perso-benchmark).
 - **Not multi-tenant.** If you need centralized policy management across many services, many tenants, and a team that isn't comfortable with policy-as-code, you've outgrown perso — go use Permit.io or Cerbos Hub. That's a legitimate, different problem.
 - **Not a dashboard or audit platform.** perso returns a decision and a reason string. It does not store history, render charts, or forward to a SIEM by itself. Wire that up at the host level if you need it.
-- **Not trying to support every access-control model.** RBAC, ReBAC, and policy hot-reload at scale are explicitly someone else's job. perso does ABAC over tool calls, well, and stops there.
+- **Not trying to support every access-control model.** ReBAC and policy hot-reload at scale are explicitly someone else's job. perso does attribute-based authorization over tool calls, well, and stops there.
+- **Not sequence-aware on its own.** perso decides one call at a time. Detecting that call #7 is dangerous *because of* calls #1–6 (intent drift, exfiltration chains) requires a context-accumulation layer above the engine — an [AARM](https://arxiv.org/html/2602.09433v1)-style host or gateway. perso is built to be the fast decision core *under* such a layer: accumulate context outside, pass it in as attributes, and per-call evaluation stays cheap enough to run on every single step.
 
 If your honest requirement is "I want tool-call authorization with zero infrastructure, embedded in a process I already control, in a language I'm already using" — that's the gap perso fills. If your requirement is "I want a managed authorization platform my whole org standardizes on" — perso is the wrong tool, and that's fine.
+
+### Is this ABAC or RBAC?
+
+Hybrid, on purpose. Rules are keyed by `(tool, role)` for O(1) dispatch — that part looks like RBAC. But the role is just one attribute among several: conditions read tool-call **arguments**, caller **session attributes**, and **resource attributes** at decision time (`amount ≤ 500`, `mfa_verified` present, `user_id == owner_id`). The role gets you to the rule; the attributes decide the outcome. If you want a label, "role-indexed ABAC" is the accurate one.
 
 ---
 
@@ -76,13 +85,13 @@ perso is one layer in an agentic system's defense, not a complete security solut
 
 **ASI02 — Tool Misuse & Exploitation.** This is perso's core job. Every tool call intent is evaluated against an explicit allow-list of (tool, role, condition) before it reaches the real implementation — evaluated in-process, with no dependency on a reachable external service. An agent role calling `process_refund` with `amount: 50000` is denied by the `NumericCheck` condition regardless of what the LLM was convinced to do — the tool's blast radius is bounded by policy, not by how well the model resists manipulation, and not by whether a network call to a PDP succeeded.
 
-**ASI03 — Agent Identity & Privilege Abuse.** perso's per-role expansion model means a given identity's permissions are explicit and inspectable — no implicit inheritance, no "admin-by-default" tool. `FieldEquals` conditions (e.g. `user_id == owner_id`) enforce ownership boundaries so even a valid role can't act outside its own scope. Compromise of one role's context doesn't expand the privilege of the call beyond what that role's rules allow.
+**ASI03 — Agent Identity & Privilege Abuse.** perso's per-role expansion model means a given identity's permissions are explicit and inspectable — no implicit inheritance, no "admin-by-default" tool. `FieldEquals` conditions (e.g. `user_id == owner_id`) enforce ownership boundaries so even a valid role can't act outside its own scope. Compromise of one role's context doesn't expand the privilege of the call beyond what that role's rules allow. (Note: today the caller is a *single* subject — see the delegation item on the [Roadmap](#roadmap) for where user-vs-agent principal separation is headed.)
 
 ### Partially mitigated
 
 **ASI01 — Agent Goal Hijack.** perso doesn't prevent an LLM from being manipulated into *wanting* to do something harmful — that's a model-behavior problem, not an authorization problem. But it is the last line of defense when a hijacked agent tries to act on that intent: a hijacked agent role still can't call `bulk_update` without `env == production` and `mfa_verified`, no matter what the prompt convinced it to attempt.
 
-**ASI08 — Cascading Agent Failures.** Default-deny limits the blast radius of any single bad decision, since unspecified calls fail closed rather than open. Full mitigation of cascading failures across multi-step agent chains needs the audit/replay layer (in progress — see Roadmap) to reconstruct *why* a sequence of calls went wrong.
+**ASI08 — Cascading Agent Failures.** Default-deny limits the blast radius of any single bad decision, since unspecified calls fail closed rather than open. But perso evaluates calls independently: a sequence of individually-allowed calls that compose into a violation (read PII → export externally) is invisible to a stateless per-call check *unless the host passes session context in as attributes* (e.g. a `has_read_pii` flag in `AgentAttributes` that a later rule can reference). Full mitigation needs both that context-passing pattern and the audit/replay layer (in progress — see Roadmap) to reconstruct *why* a sequence of calls went wrong.
 
 **ASI09 — Human-Agent Trust Exploitation.** Every decision includes a structured `reason` string, giving a human reviewer something concrete to check rather than trusting the agent's own account of what it did. This is a partial mitigation — it supports human review, it doesn't automate it.
 
@@ -130,6 +139,7 @@ The LLM returns a tool call intent. The backend intercepts it, builds a context 
 ```
 perso/
 ├── Cargo.toml                  # workspace root — all shared deps declared here
+├── LICENSE                     # MIT
 ├── policies/
 │   └── example.json            # ready-to-use example policy
 └── crates/
@@ -265,7 +275,11 @@ Operators: `In`, `NotIn`
 { "Not": "<condition>" }
 ```
 
-**Source values:** `"Arguments"` (tool call args from the LLM), `"AgentAttributes"` (caller session data), `"ResourceAttributes"` (the resource being acted on).
+**Source values:**
+
+- `"Arguments"` — the tool-call arguments produced by the LLM. Untrusted by definition.
+- `"AgentAttributes"` — attributes of the **calling session**, supplied by the host (role claims, `mfa_verified`, `env`, `user_id`, …). **Naming note:** "agent" here means *the caller's session* — which today is a single subject bag, whether the caller is a human user or an AI agent acting on a human's behalf. perso does not yet model the user and the AI agent as two separate principals whose permissions intersect (the confused-deputy problem). That separation is on the [Roadmap](#roadmap); until then, hosts that need it can namespace fields inside this bag (e.g. `user_role`, `agent_trust`) and write conditions against both.
+- `"ResourceAttributes"` — attributes of the resource being acted on (e.g. `owner_id`), supplied by the host.
 
 ### Glob expansion
 
@@ -374,7 +388,10 @@ See `crates/policy-test/src/lib.rs` (`mod wasm_tests`) for a complete, working `
 
 ## Embedding in a Node.js host
 
-No extra packages needed — Node.js has built-in `WebAssembly` support.
+**Two ways to integrate:**
+
+- **The SDK (recommended):** `npm install @teknokeras/perso-sdk` — wraps the entire ABI below in a typed API, plus audit logging. See [perso-sdk-node](https://github.com/teknokeras/perso-sdk-node).
+- **The raw ABI (shown below):** zero dependencies — Node.js has built-in `WebAssembly` support. Use this if you want no packages at all, or as a reference for what the SDK does under the hood.
 
 The WASM binary contains **no policy**. You load `policy_runtime.wasm` (the engine) and `example.json` (the policy) separately, then pass the policy JSON to `init()` at startup.
 
@@ -451,7 +468,10 @@ console.log(readResponse(init(rPtr, rLen)));
 
 ## Embedding in a Python host
 
-Install the official Bytecode Alliance wasmtime binding:
+**Two ways to integrate:**
+
+- **The SDK (recommended):** `pip install perso-sdk` — same shape as the Node SDK, synchronous API. See [perso-sdk-python](https://github.com/teknokeras/perso-sdk-python).
+- **The raw ABI (shown below):** just the official Bytecode Alliance wasmtime binding, as a reference for what the SDK does under the hood.
 
 ```
 pip install wasmtime
@@ -570,6 +590,7 @@ Call `init` again with new policy JSON at any time. The `Mutex<PolicyState>` ins
 - `default_action: "Deny"` means anything not explicitly allowed is rejected. This is the safe default and the one used in the example policy.
 - Conditions are evaluated against three separate JSON bags — arguments, agent attributes, and resource attributes — so the LLM-supplied arguments can never impersonate session data.
 - The WASM sandbox means perso has no filesystem, network, or syscall access. It only reads and writes linear memory. This also means a misbehaving policy can't reach out to anything, even by accident.
+- **perso is stateless and per-call.** It holds no session history and detects no cross-call patterns. For agentic loops, the host or a gateway should accumulate session context (calls made, data touched, taint flags) and pass it into `AgentAttributes` on each evaluation — rules can then express sequence-aware policies like "deny `export_data` if `has_read_pii` is set." Where accumulation and enforcement should live (in-process vs. a trusted gateway) is a genuine architectural trade-off: in-process fits self-hosted, single-tenant deployments where the host *is* the trust boundary; a gateway fits multi-tenant or lower-trust hosts. perso works in both placements — it is an engine, not a topology.
 - For zero-trust deployments, embed perso in both the backend (knows the user role) and the MCP server (knows the service identity). Each layer enforces independently, with no shared external dependency to fail.
 
 See [Threat model](#threat-model) above for how this maps to the OWASP Agentic Applications risk categories.
@@ -636,8 +657,16 @@ Any tool whose name matches `crm_tool_*` is unconditionally available to admins.
 ## Roadmap
 
 - ~~**Latency benchmark**~~ — done. See [perso-benchmark](https://github.com/teknokeras/perso-benchmark) for the full methodology and results: in-process WASM evaluation is ~29× faster at the median than the same decision over a localhost network call, ~53× at p99.
-- Audit/replay layer for reconstructing multi-step decision chains (referenced under ASI08 above).
 - ~~`perso-sdk-python`~~ — done. See [perso-sdk-python](https://github.com/teknokeras/perso-sdk-python).
+- **First-class user↔agent delegation.** Today the caller is a single subject. Planned: separate principal bags for the human user and the AI agent acting on their behalf, with policies able to require conditions on *both* — so an AI agent can never exceed the human's permissions, and vice versa (confused-deputy defense). Until then, the documented workaround is namespacing both principals' fields inside `AgentAttributes`.
+- **Session-context conventions.** A documented attribute vocabulary for sequence-aware policies (e.g. `session.has_read_pii`, `session.call_count`) so hosts and gateways that accumulate context can write portable rules against it.
+- **Audit/replay layer** for reconstructing multi-step decision chains (referenced under ASI08 above).
+
+---
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
 
 ---
 
